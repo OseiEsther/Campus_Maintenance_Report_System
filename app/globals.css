@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 5% 98%;
+    --foreground: 240 6% 13%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 6% 13%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 6% 13%;
+    --primary: 240 6% 14%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 5% 95%;
+    --secondary-foreground: 240 6% 14%;
+    --muted: 240 5% 95%;
+    --muted-foreground: 240 4% 44%;
+    --accent: 240 5% 93%;
+    --accent-foreground: 240 6% 14%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 240 5% 91%;
+    --input: 240 5% 91%;
+    --ring: 240 6% 14%;
+    --radius: 0.5rem;
+
+    --status-open: 28 85% 44%;
+    --status-progress: 215 80% 48%;
+    --status-resolved: 154 65% 32%;
+    --accent-teal: 199 89% 38%;
+
+    --chart-1: 240 6% 14%;
+    --chart-2: 154 65% 32%;
+    --chart-3: 28 85% 44%;
+    --chart-4: 215 80% 48%;
+    --chart-5: 240 4% 44%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-sans), "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: normal;
+    line-height: 1.55;
+    font-feature-settings: "tnum";
+  }
+  h1 {
+    font-family: var(--font-sans), "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: -0.01em;
+    font-weight: 600;
+  }
+  h2, h3, h4, h5, h6 {
+    font-family: var(--font-sans), "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    letter-spacing: normal;
+    font-weight: 500;
+  }
+}
+
+.bg-grid-subtle {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.06) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--border));
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
+
+/* Smooth transitions for interactive elements */
+button, a, [role="button"] {
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease, opacity 150ms ease;
+}
