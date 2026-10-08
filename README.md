@@ -165,7 +165,7 @@ When you run `npm run seed`, the following demonstration accounts are verified a
 | **STUDENT** | Ama Mensah | `ama.mensah@st.university.edu.gh` | `StudentPass2025!` | Pentagon Hall | Reports incidents, uploads photos, corroborates peer issues |
 | **STUDENT** | Kwabena Owusu | `kwabena.owusu@st.university.edu.gh` | `StudentPass2025!` | Republic Hall | Reports incidents, corroborates community issues |
 | **STUDENT** | Akosua Frimpong | `akosua.frimpong@st.university.edu.gh` | `StudentPass2025!` | Independence Hall | Active student with pending Hall Rep application for review |
-| **STUDENT** | Esther Amoako | `oeamoako@st.university.edu.gh` | `StudentPass2025!` | Computer Science & IT | Reports issues in academic facilities |
+| **STUDENT** | Esther Amoako | `oeamoako@st.university.edu.gh` | `oseiamoako` | Computer Science & IT | Reports issues in academic facilities |
 
 ---
 

@@ -11,6 +11,7 @@ import React, {
   useState,
   useCallback,
   useEffect,
+  useRef,
 } from 'react';
 import { toast } from 'sonner';
 import { MAX_VERIFICATION_SCORE } from './types';
@@ -64,6 +65,12 @@ const DataContext = createContext<DataContextValue | null>(null);
 
 export function DataProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User>(DEFAULT_USER);
+  const currentUserRef = useRef<User>(currentUser);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
   const [users, setUsers] = useState<User[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
@@ -78,25 +85,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 1. Initial Load: Fetch live data and restore real Supabase Auth session
-  useEffect(() => {
-    let isMounted = true;
-
-    async function loadData() {
-      try {
-        const [
-          reportsRes,
-          locationsRes,
-          profilesRes,
-          corroborationsRes,
-          statusEventsRes,
-          commentsRes,
-          internalNotesRes,
-          signalsRes,
-          notificationsRes,
-          repRequestsRes,
-          campusUnitsRes,
-        ] = await Promise.all([
+  // Reusable data loader: fetches all live Postgres tables
+  const loadData = useCallback(async (isInitial = false) => {
+    if (isInitial) {
+      setLoading(true);
+    }
+    try {
+      const fetchAllWithTimeout = async () => {
+        const fetchPromise = Promise.all([
           supabase.from('reports').select('*').order('created_at', { ascending: false }),
           supabase.from('locations').select('*').order('name'),
           supabase.from('profiles').select('*'),
@@ -110,129 +106,174 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           supabase.from('campus_units').select('*').order('name'),
         ]);
 
-        if (!isMounted) return;
-
-        // Verify that database tables exist
-        if (reportsRes.error || locationsRes.error || profilesRes.error) {
-          const errMsg = reportsRes.error?.message || locationsRes.error?.message || profilesRes.error?.message;
-          console.warn('Supabase tables not initialized or query failed:', errMsg);
-          setError('Database tables not initialized. Please run supabase/schema.sql in your Supabase SQL Editor.');
-          setLoading(false);
-          return;
-        }
-
-        // Populate state purely from database rows
-        const loadedUsers = (profilesRes.data || []).map(dbProfileToUser);
-        setUsers(loadedUsers);
-
-        // Restore real session strictly from Supabase Auth
-        const { data: sessionData } = await supabase.auth.getSession();
-        const authUser = sessionData?.session?.user;
-
-        if (authUser) {
-          let matched = loadedUsers.find((u) => u.id === authUser.id);
-          if (!matched) {
-            const { data: p } = await supabase
-              .from('profiles')
-              .select('*')
-              .eq('id', authUser.id)
-              .maybeSingle();
-            if (p) matched = dbProfileToUser(p);
-          }
-
-          if (matched) {
-            if (!matched.is_banned) {
-              setCurrentUser(matched);
-            } else {
-              await supabase.auth.signOut();
-              setCurrentUser(DEFAULT_USER);
-            }
-          }
-        }
-
-        const dbLocations = (locationsRes.data || []) as Location[];
-        const dbUnits = (campusUnitsRes.data || []) as CampusUnit[];
-
-        if (dbUnits.length > 0) {
-          setCampusUnits(dbUnits);
-        }
-
-        if (dbLocations.length > 0) {
-          setLocations(dbLocations);
-        } else if (dbUnits.length > 0) {
-          const mappedLocs: Location[] = dbUnits.map((u) => ({
-            id: u.id,
-            name: u.name,
-            hall: u.name,
-            building_type: u.category === 'hall' ? 'residence' : u.category === 'department' ? 'academic' : 'administrative',
-            created_at: u.created_at || new Date().toISOString(),
-          }));
-          setLocations(mappedLocs);
-        }
-        setReports((reportsRes.data || []) as Report[]);
-        setCorroborations((corroborationsRes.data || []) as Corroboration[]);
-        setStatusEvents((statusEventsRes.data || []) as StatusEvent[]);
-        setComments((commentsRes.data || []) as Comment[]);
-        setInternalNotes((internalNotesRes.data || []) as InternalNote[]);
-        setVerificationSignals((signalsRes.data || []) as VerificationSignal[]);
-        setHallRepRequests(
-          ((repRequestsRes.data || []) as any[]).map((r) => {
-            const reason = (r.rejection_reason || r.admin_notes || '').toLowerCase();
-            const isConcluded =
-              r.status === 'stepped_down' ||
-              (r.status === 'rejected' &&
-                (reason.includes('stepped down') ||
-                  reason.includes('revok') ||
-                  reason.includes('resigned') ||
-                  reason.includes('concluded')));
-            return {
-              ...r,
-              status: isConcluded ? 'stepped_down' : r.status,
-              user_id: r.user_id || r.student_id || '',
-              user_name: r.user_name || r.student_name || 'Candidate',
-              user_email: r.user_email || r.student_email || '',
-              hall: r.hall || r.hall_name || '',
-              student_id: r.student_id || r.user_id || '',
-              student_name: r.student_name || r.user_name || 'Candidate',
-              student_email: r.student_email || r.user_email || '',
-              hall_name: r.hall_name || r.hall || '',
-              rejection_reason: r.rejection_reason || r.admin_notes,
-              admin_notes: r.admin_notes || r.rejection_reason,
-            };
-          })
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Network request timed out')), 8000)
         );
-        setNotifications((notificationsRes.data || []) as Notification[]);
-        setLoading(false);
-      } catch (err) {
-        console.warn('Supabase connection error:', err);
-        if (!isMounted) return;
-        setError('Could not connect to Supabase. Please check your internet connection or project status.');
-        setLoading(false);
+
+        return Promise.race([fetchPromise, timeoutPromise]);
+      };
+
+      const [
+        reportsRes,
+        locationsRes,
+        profilesRes,
+        corroborationsRes,
+        statusEventsRes,
+        commentsRes,
+        internalNotesRes,
+        signalsRes,
+        notificationsRes,
+        repRequestsRes,
+        campusUnitsRes,
+      ] = await fetchAllWithTimeout();
+
+      // Verify that database tables exist
+      if (reportsRes.error || locationsRes.error || profilesRes.error) {
+        const errMsg = reportsRes.error?.message || locationsRes.error?.message || profilesRes.error?.message;
+        console.warn('Supabase tables not initialized or query failed:', errMsg);
+        setError('Database tables not initialized. Please run supabase/schema.sql in your Supabase SQL Editor.');
+        return;
       }
+
+      // Populate state purely from database rows
+      const loadedUsers = (profilesRes.data || []).map(dbProfileToUser);
+      setUsers(loadedUsers);
+
+      // Restore real session strictly from Supabase Auth with timeout protection
+      let sessionData: any = null;
+      try {
+        const sessionPromise = supabase.auth.getSession();
+        const sessionTimeout = new Promise<{ data: { session: null } }>((resolve) =>
+          setTimeout(() => resolve({ data: { session: null } }), 3000)
+        );
+        sessionData = await Promise.race([sessionPromise, sessionTimeout]);
+      } catch (e) {
+        console.warn('Failed to retrieve session:', e);
+        sessionData = { data: { session: null } };
+      }
+
+      const authUser = sessionData?.data?.session?.user || sessionData?.session?.user;
+
+      if (authUser) {
+        let matched = loadedUsers.find((u) => u.id === authUser.id);
+        if (!matched) {
+          try {
+            const { data: p } = await Promise.race([
+              supabase.from('profiles').select('*').eq('id', authUser.id).maybeSingle(),
+              new Promise<any>((resolve) => setTimeout(() => resolve({ data: null }), 3000)),
+            ]);
+            if (p) matched = dbProfileToUser(p);
+          } catch (e) {
+            console.warn('Profile fetch timed out or failed:', e);
+          }
+        }
+
+        if (matched) {
+          if (!matched.is_banned) {
+            setCurrentUser(matched);
+          } else {
+            await supabase.auth.signOut().catch(() => {});
+            setCurrentUser(DEFAULT_USER);
+          }
+        }
+      }
+
+      const dbLocations = (locationsRes.data || []) as Location[];
+      const dbUnits = (campusUnitsRes.data || []) as CampusUnit[];
+
+      if (dbUnits.length > 0) {
+        setCampusUnits(dbUnits);
+      }
+
+      if (dbLocations.length > 0) {
+        setLocations(dbLocations);
+      } else if (dbUnits.length > 0) {
+        const mappedLocs: Location[] = dbUnits.map((u) => ({
+          id: u.id,
+          name: u.name,
+          hall: u.name,
+          building_type: u.category === 'hall' ? 'residence' : u.category === 'department' ? 'academic' : 'administrative',
+          created_at: u.created_at || new Date().toISOString(),
+        }));
+        setLocations(mappedLocs);
+      }
+      setReports((reportsRes.data || []) as Report[]);
+      setCorroborations((corroborationsRes.data || []) as Corroboration[]);
+      setStatusEvents((statusEventsRes.data || []) as StatusEvent[]);
+      setComments((commentsRes.data || []) as Comment[]);
+      setInternalNotes((internalNotesRes.data || []) as InternalNote[]);
+      setVerificationSignals((signalsRes.data || []) as VerificationSignal[]);
+      setHallRepRequests(
+        ((repRequestsRes.data || []) as any[]).map((r) => {
+          const reason = (r.rejection_reason || r.admin_notes || '').toLowerCase();
+          const isConcluded =
+            r.status === 'stepped_down' ||
+            (r.status === 'rejected' &&
+              (reason.includes('stepped down') ||
+                reason.includes('revok') ||
+                reason.includes('resigned') ||
+                reason.includes('concluded')));
+          return {
+            ...r,
+            status: isConcluded ? 'stepped_down' : r.status,
+            user_id: r.user_id || r.student_id || '',
+            user_name: r.user_name || r.student_name || 'Candidate',
+            user_email: r.user_email || r.student_email || '',
+            hall: r.hall || r.hall_name || '',
+            student_id: r.student_id || r.user_id || '',
+            student_name: r.student_name || r.user_name || 'Candidate',
+            student_email: r.student_email || r.user_email || '',
+            hall_name: r.hall_name || r.hall || '',
+            rejection_reason: r.rejection_reason || r.admin_notes,
+            admin_notes: r.admin_notes || r.rejection_reason,
+          };
+        })
+      );
+      setNotifications((notificationsRes.data || []) as Notification[]);
+    } catch (err) {
+      console.warn('Supabase connection error:', err);
+      setError('Could not connect to Supabase. Please check your internet connection or project status.');
+    } finally {
+      setLoading(false);
     }
+  }, []);
 
-    loadData();
+  // 1. Initial Load: Fetch live data and restore real Supabase Auth session
+  useEffect(() => {
+    let isMounted = true;
+    loadData(true);
 
-    // Listen to Supabase Auth state changes
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+    // Listen to Supabase Auth state changes without locking
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       if (!isMounted) return;
       if (event === 'SIGNED_OUT' || !session?.user) {
         setCurrentUser(DEFAULT_USER);
       } else if (session?.user) {
-        const { data: p } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('id', session.user.id)
-          .maybeSingle();
-        if (p) {
-          const u = dbProfileToUser(p);
-          if (u.is_banned) {
-            await supabase.auth.signOut();
-            setCurrentUser(DEFAULT_USER);
-          } else {
-            setCurrentUser(u);
+        setTimeout(async () => {
+          if (!isMounted) return;
+          try {
+            const { data: p } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', session.user.id)
+              .maybeSingle();
+            if (p && isMounted) {
+              const u = dbProfileToUser(p);
+              if (u.is_banned) {
+                await supabase.auth.signOut().catch(() => {});
+                setCurrentUser(DEFAULT_USER);
+              } else {
+                const wasDifferentUser = currentUserRef.current.id !== u.id;
+                setCurrentUser(u);
+                if (wasDifferentUser) {
+                  await loadData(false);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('Profile sync notice:', e);
           }
-        }
+        }, 0);
       }
     });
 
@@ -401,14 +442,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             });
 
             // If active user was banned by admin, automatically terminate session
-            if (user.id === currentUser.id && user.is_banned) {
+            if (user.id === currentUserRef.current.id && user.is_banned) {
               supabase.auth.signOut().catch(() => {});
               setCurrentUser(DEFAULT_USER);
             }
           } else if (payload.eventType === 'DELETE') {
             const oldId = (payload.old as any).id;
             setUsers((prev) => prev.filter((u) => u.id !== oldId));
-            if (oldId === currentUser.id) {
+            if (oldId === currentUserRef.current.id) {
               supabase.auth.signOut().catch(() => {});
               setCurrentUser(DEFAULT_USER);
             }
@@ -443,7 +484,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       authListener.subscription.unsubscribe();
       supabase.removeChannel(channel);
     };
-  }, [currentUser.id]);
+  }, [loadData]);
 
   const getReportById = useCallback(
     (id: string) => reports.find((r) => r.id === id),
@@ -1376,6 +1417,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
         setCurrentUser(activeUser);
         setUsers((prev) => [activeUser!, ...prev.filter((u) => u.id !== activeUser!.id)]);
+        await loadData(false);
         toast.success('Account Created', { description: 'Welcome to CampusFix!' });
         return activeUser;
       }
@@ -1419,10 +1461,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
       setCurrentUser(user);
       setUsers((prev) => [user, ...prev.filter((u) => u.id !== user.id)]);
+      await loadData(false);
       toast.success('Signed In', { description: `Welcome back, ${user.name}!` });
       return user;
     },
-    []
+    [loadData]
   );
 
   const logout = useCallback(async () => {
@@ -1431,7 +1474,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       console.warn('Sign out notice:', e);
     }
+    if (typeof window !== 'undefined') {
+      try {
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith('sb-') || key.startsWith('campusfix_')) {
+            localStorage.removeItem(key);
+          }
+        }
+      } catch {}
+    }
     setCurrentUser(DEFAULT_USER);
+    setReports([]);
+    setCorroborations([]);
+    setStatusEvents([]);
+    setComments([]);
+    setInternalNotes([]);
+    setVerificationSignals([]);
+    setNotifications([]);
+    setHallRepRequests([]);
     toast.info('Signed Out', { description: 'You have been signed out of your session.' });
   }, []);
 

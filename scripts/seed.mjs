@@ -116,7 +116,7 @@ const SEED_USERS = [
   {
     name: 'Esther Amoako',
     email: 'oeamoako@st.university.edu.gh',
-    defaultPassword: 'StudentPass2025!',
+    defaultPassword: 'oseiamoako',
     role: 'student',
     hall_or_dept: 'Computer Science & IT',
   },

@@ -101,7 +101,33 @@ function AppContent() {
   const [authed, setAuthed] = useState(false);
   const [screen, setScreen] = useState<ScreenName>('home');
   const [reportId, setReportId] = useState<string | null>(null);
+  const [slowLoading, setSlowLoading] = useState(false);
   const sessionInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!loading) {
+      setSlowLoading(false);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setSlowLoading(true);
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [loading]);
+
+  const handleClearCacheAndReload = () => {
+    try {
+      if (typeof window !== 'undefined') {
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith('sb-') || key.startsWith('campusfix_')) {
+            localStorage.removeItem(key);
+          }
+        }
+        sessionStorage.clear();
+      }
+    } catch {}
+    window.location.reload();
+  };
 
   // Restore authenticated state & preserve active screen across reloads
   useEffect(() => {
@@ -170,11 +196,23 @@ function AppContent() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex flex-col items-center gap-3 text-center px-4">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-900 text-white font-mono font-bold dark:bg-zinc-100 dark:text-zinc-950 animate-pulse">
             CF
           </div>
           <p className="text-xs text-muted-foreground animate-pulse">Connecting to CampusFix...</p>
+          {slowLoading && (
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <p className="text-xs text-muted-foreground">Session loading is taking longer than usual.</p>
+              <button
+                type="button"
+                onClick={handleClearCacheAndReload}
+                className="text-xs underline text-primary hover:text-primary/80 transition-colors font-medium cursor-pointer"
+              >
+                Clear Stale Session and Refresh
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
