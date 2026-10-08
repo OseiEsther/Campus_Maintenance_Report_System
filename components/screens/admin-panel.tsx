@@ -36,8 +36,12 @@ import {
   Filter,
   ShieldAlert,
   Loader2,
+  GraduationCap,
+  Landmark,
+  Home,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
 import { useData } from '@/lib/data-context';
 import {
   Table,
@@ -69,7 +73,17 @@ import {
   formatReportToken,
   matchTicketSearch,
 } from '@/lib/format';
-import type { Role, BuildingType, Category, HallRepRequest, User, Report, Location } from '@/lib/types';
+import type {
+  Role,
+  BuildingType,
+  Category,
+  HallRepRequest,
+  User,
+  Report,
+  Location,
+  CampusUnit,
+  CampusUnitCategory,
+} from '@/lib/types';
 import type { ScreenName } from '@/components/shared/app-shell';
 import { DataPagination, usePagination } from '@/components/shared/data-pagination';
 
@@ -81,6 +95,37 @@ export type AdminView =
   | 'onboarding'
   | 'locations'
   | 'audit';
+
+function isRevokedReq(req: HallRepRequest): boolean {
+  if (req.status === 'approved' || req.status === 'pending') return false;
+  const reason = (req.rejection_reason || req.admin_notes || '').toLowerCase();
+  const reviewer = (req.reviewed_by || '').toLowerCase();
+  return (
+    reason.includes('revok') ||
+    reason.includes('concluded') ||
+    reason.includes('terminated') ||
+    reason.includes('administrative') ||
+    (reviewer !== '' && !reviewer.includes('self') && req.status === 'stepped_down')
+  );
+}
+
+function isSteppedDownReq(req: HallRepRequest): boolean {
+  if (req.status === 'approved' || req.status === 'pending') return false;
+  if (isRevokedReq(req)) return false;
+  const reason = (req.rejection_reason || req.admin_notes || '').toLowerCase();
+  const reviewer = (req.reviewed_by || '').toLowerCase();
+  return (
+    req.status === 'stepped_down' ||
+    reviewer.includes('self') ||
+    reason.includes('stepped down') ||
+    reason.includes('resigned')
+  );
+}
+
+function isDeclinedReq(req: HallRepRequest): boolean {
+  if (req.status === 'approved' || req.status === 'pending') return false;
+  return !isRevokedReq(req) && !isSteppedDownReq(req);
+}
 
 export function AdminPanel({
   view = 'analytics',
@@ -100,6 +145,10 @@ export function AdminPanel({
     addLocation,
     updateLocation,
     deleteLocation,
+    campusUnits,
+    addCampusUnit,
+    updateCampusUnit,
+    deleteCampusUnit,
     hallRepRequests,
     reviewHallRepRequest,
     revokeHallRepStatus,
@@ -111,9 +160,27 @@ export function AdminPanel({
     restoreReport,
   } = useData();
 
+  // Infrastructure tab switcher ('units' | 'locations')
+  const [infraSubTab, setInfraSubTab] = useState<'units' | 'locations'>('units');
+
   // Location form
   const [newLocName, setNewLocName] = useState('');
   const [newLocType, setNewLocType] = useState<BuildingType>('residence');
+
+  // Campus Units management state
+  const [unitSearch, setUnitSearch] = useState('');
+  const [unitCategoryFilter, setUnitCategoryFilter] = useState<string>('all');
+  const [newUnitName, setNewUnitName] = useState('');
+  const [newUnitCategory, setNewUnitCategory] = useState<CampusUnitCategory>('hall');
+  const [isAddingUnit, setIsAddingUnit] = useState(false);
+
+  const [editingUnit, setEditingUnit] = useState<CampusUnit | null>(null);
+  const [editUnitName, setEditUnitName] = useState('');
+  const [editUnitCategory, setEditUnitCategory] = useState<CampusUnitCategory>('hall');
+  const [isSavingUnit, setIsSavingUnit] = useState(false);
+
+  const [deletingUnit, setDeletingUnit] = useState<CampusUnit | null>(null);
+  const [isDeletingUnit, setIsDeletingUnit] = useState(false);
 
   // Staff Onboarding form
   const [staffName, setStaffName] = useState('');
@@ -220,7 +287,7 @@ export function AdminPanel({
     setTempPasskey(key);
   };
 
-  const handleOnboardSubmit = (e: React.FormEvent) => {
+  const handleOnboardSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!staffName.trim() || !staffEmail.trim() || !tempPasskey.trim()) {
       toast.error('Please fill in all staff details.');
@@ -232,21 +299,27 @@ export function AdminPanel({
       return;
     }
 
-    const created = onboardStaff(
-      staffName.trim(),
-      staffEmail.trim(),
-      staffDept.trim(),
-      tempPasskey.trim()
-    );
+    try {
+      const created = await onboardStaff(
+        staffName.trim(),
+        staffEmail.trim(),
+        staffDept.trim(),
+        tempPasskey.trim()
+      );
 
-    toast.success('Staff Member Onboarded', {
-      description: `${created.name} provisioned with temporary passkey: ${tempPasskey}`,
-    });
+      toast.success('Staff Member Onboarded', {
+        description: `${created.name} provisioned with temporary passkey: ${tempPasskey}`,
+      });
 
-    // Reset form with new passkey
-    setStaffName('');
-    setStaffEmail('');
-    generateNewPasskey();
+      // Reset form with new passkey
+      setStaffName('');
+      setStaffEmail('');
+      generateNewPasskey();
+    } catch (err: any) {
+      toast.error('Failed to Onboard Staff', {
+        description: err.message || 'An error occurred while creating staff account.',
+      });
+    }
   };
 
   const copyCredentials = (email: string, passkey?: string) => {
@@ -271,36 +344,7 @@ export function AdminPanel({
     });
   }, [users, userSearch, roleFilter]);
 
-  const isRevokedReq = (req: HallRepRequest) => {
-    if (req.status === 'approved' || req.status === 'pending') return false;
-    const reason = (req.rejection_reason || req.admin_notes || '').toLowerCase();
-    const reviewer = (req.reviewed_by || '').toLowerCase();
-    return (
-      reason.includes('revok') ||
-      reason.includes('concluded') ||
-      reason.includes('terminated') ||
-      reason.includes('administrative') ||
-      (reviewer !== '' && !reviewer.includes('self') && req.status === 'stepped_down')
-    );
-  };
 
-  const isSteppedDownReq = (req: HallRepRequest) => {
-    if (req.status === 'approved' || req.status === 'pending') return false;
-    if (isRevokedReq(req)) return false;
-    const reason = (req.rejection_reason || req.admin_notes || '').toLowerCase();
-    const reviewer = (req.reviewed_by || '').toLowerCase();
-    return (
-      req.status === 'stepped_down' ||
-      reviewer.includes('self') ||
-      reason.includes('stepped down') ||
-      reason.includes('resigned')
-    );
-  };
-
-  const isDeclinedReq = (req: HallRepRequest) => {
-    if (req.status === 'approved' || req.status === 'pending') return false;
-    return !isRevokedReq(req) && !isSteppedDownReq(req);
-  };
 
   const filteredRepRequests = useMemo(() => {
     return (hallRepRequests || []).filter((req) => {
@@ -451,6 +495,67 @@ export function AdminPanel({
   const locationsPagination = usePagination(locations, {
     pageSize: 9,
   });
+
+  const filteredCampusUnits = useMemo(() => {
+    return (campusUnits || []).filter((u) => {
+      if (unitCategoryFilter !== 'all' && u.category !== unitCategoryFilter) return false;
+      if (unitSearch.trim()) {
+        const q = unitSearch.toLowerCase();
+        return u.name.toLowerCase().includes(q);
+      }
+      return true;
+    });
+  }, [campusUnits, unitSearch, unitCategoryFilter]);
+
+  const campusUnitsPagination = usePagination(filteredCampusUnits, {
+    pageSize: 12,
+    resetDeps: [unitSearch, unitCategoryFilter],
+  });
+
+  const handleAddUnit = async () => {
+    if (!newUnitName.trim()) return;
+    setIsAddingUnit(true);
+    try {
+      await addCampusUnit(newUnitName.trim(), newUnitCategory);
+      setNewUnitName('');
+    } catch (err: any) {
+      // Handled in addCampusUnit
+    } finally {
+      setIsAddingUnit(false);
+    }
+  };
+
+  const openEditUnit = (unit: CampusUnit) => {
+    setEditingUnit(unit);
+    setEditUnitName(unit.name);
+    setEditUnitCategory(unit.category);
+  };
+
+  const handleSaveUnit = async () => {
+    if (!editingUnit || !editUnitName.trim()) return;
+    setIsSavingUnit(true);
+    try {
+      await updateCampusUnit(editingUnit.id, editUnitName.trim(), editUnitCategory);
+      setEditingUnit(null);
+    } catch (err: any) {
+      // Handled in updateCampusUnit
+    } finally {
+      setIsSavingUnit(false);
+    }
+  };
+
+  const handleDeleteUnit = async () => {
+    if (!deletingUnit) return;
+    setIsDeletingUnit(true);
+    try {
+      await deleteCampusUnit(deletingUnit.id);
+      setDeletingUnit(null);
+    } catch (err: any) {
+      // Handled in deleteCampusUnit
+    } finally {
+      setIsDeletingUnit(false);
+    }
+  };
 
   const handleAddLocation = () => {
     if (newLocName.trim().length < 3) return;
@@ -2200,7 +2305,7 @@ export function AdminPanel({
                         {isPending ? (
                           <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-0.5 text-xs font-semibold text-amber-700">
                             <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-                            Temporary Passkey Active ({staff.tempPasskey || 'Issued'})
+                            Temporary Passkey Active (Pending First Login)
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
@@ -2213,7 +2318,7 @@ export function AdminPanel({
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => copyCredentials(staff.email, staff.tempPasskey)}
+                          onClick={() => copyCredentials(staff.email)}
                           className="h-7 text-xs gap-1"
                         >
                           <Copy className="h-3 w-3" />
@@ -2240,9 +2345,404 @@ export function AdminPanel({
             Campus Locations &amp; Infrastructure
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Configure buildings, blocks, and residence halls available for maintenance ticket submissions.
+            Configure official residence halls and departments, as well as granular facility locations for maintenance tickets.
           </p>
         </div>
+
+        {/* Sub-tab Navigation Switcher */}
+        <div className="flex border-b border-border gap-2">
+          <button
+            type="button"
+            onClick={() => setInfraSubTab('units')}
+            className={cn(
+              'flex items-center gap-2 border-b-2 px-4 py-2.5 text-xs font-semibold transition-all',
+              infraSubTab === 'units'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            <Shield className="h-4 w-4" />
+            Official Halls &amp; Departments ({campusUnits.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setInfraSubTab('locations')}
+            className={cn(
+              'flex items-center gap-2 border-b-2 px-4 py-2.5 text-xs font-semibold transition-all',
+              infraSubTab === 'locations'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            )}
+          >
+            <MapPin className="h-4 w-4" />
+            Specific Rooms &amp; Facilities ({locations.length})
+          </button>
+        </div>
+
+        {infraSubTab === 'units' ? (
+          /* =====================================================================
+             SUB-TAB: OFFICIAL HALLS & DEPARTMENTS REGISTRY
+             ===================================================================== */
+          <div className="space-y-6 animate-fade-in">
+            {/* Explanatory Context Banner */}
+            <div className="flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 p-4 text-xs text-muted-foreground">
+              <ShieldCheck className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-semibold text-foreground">
+                  Official Institutional Registry for Sign-up and Governance
+                </p>
+                <p>
+                  This master registry defines the approved residence halls, academic departments, and administrative units presented during student sign-up, profile settings, and Hall Representative applications. Maintaining these official records prevents spelling discrepancies, casing conflicts, and orphaned tickets.
+                </p>
+              </div>
+            </div>
+
+            {/* Add Campus Unit Form Card */}
+            <div className="rounded-xl border border-border bg-card p-6 shadow-xs space-y-4">
+              <div className="flex items-center gap-2">
+                <Plus className="h-5 w-5 text-primary" />
+                <h2 className="font-heading text-base font-semibold text-foreground">
+                  Add Official Hall or Department
+                </h2>
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                <div className="flex-1 space-y-1.5">
+                  <Label htmlFor="new-unit-name" className="text-xs">
+                    Unit / Hall / Department Name
+                  </Label>
+                  <Input
+                    id="new-unit-name"
+                    placeholder="e.g. Jean Nelson Aka Hall, Computer Science & IT, Student Affairs"
+                    value={newUnitName}
+                    onChange={(e) => setNewUnitName(e.target.value)}
+                    className="text-sm"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Category</Label>
+                  <Select
+                    value={newUnitCategory}
+                    onValueChange={(v) => setNewUnitCategory(v as CampusUnitCategory)}
+                  >
+                    <SelectTrigger className="w-[200px] text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="hall">Residence Hall</SelectItem>
+                      <SelectItem value="department">Academic Department</SelectItem>
+                      <SelectItem value="administrative">Administrative / General Unit</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <Button
+                  onClick={handleAddUnit}
+                  disabled={newUnitName.trim().length < 2 || isAddingUnit}
+                  size="sm"
+                >
+                  {isAddingUnit ? (
+                    <>
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      Adding...
+                    </>
+                  ) : (
+                    <>
+                      <Plus className="mr-1.5 h-4 w-4" />
+                      Add Campus Unit
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* Search, Filter & Catalog */}
+            <div className="rounded-xl border border-border bg-card p-6 shadow-xs space-y-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="font-heading text-base font-semibold text-foreground">
+                    Official Registry Catalog ({filteredCampusUnits.length})
+                  </h3>
+                  <p className="text-xs text-muted-foreground">
+                    Available options displayed to students and staff across the platform
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                  <div className="relative w-full sm:w-64">
+                    <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      placeholder="Search halls &amp; depts..."
+                      value={unitSearch}
+                      onChange={(e) => setUnitSearch(e.target.value)}
+                      className="pl-8 text-xs h-8"
+                    />
+                  </div>
+
+                  <Select
+                    value={unitCategoryFilter}
+                    onValueChange={setUnitCategoryFilter}
+                  >
+                    <SelectTrigger className="w-full sm:w-[160px] text-xs h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Categories</SelectItem>
+                      <SelectItem value="hall">Residence Halls</SelectItem>
+                      <SelectItem value="department">Departments</SelectItem>
+                      <SelectItem value="administrative">Administrative</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {filteredCampusUnits.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-border p-8 text-center text-xs text-muted-foreground">
+                  No campus units found matching your search criteria.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {campusUnitsPagination.paginatedItems.map((unit) => {
+                    const registeredCount = users.filter(
+                      (u) => (u.hall_or_dept || '').trim().toLowerCase() === unit.name.trim().toLowerCase()
+                    ).length;
+                    const ticketCount = reports.filter(
+                      (r) => (r.hall || '').trim().toLowerCase() === unit.name.trim().toLowerCase() && !r.is_archived
+                    ).length;
+
+                    return (
+                      <div
+                        key={unit.id}
+                        className="flex items-start justify-between gap-3 rounded-lg border border-border bg-muted/20 p-3 text-sm hover:border-zinc-300 dark:hover:border-zinc-700 transition-colors"
+                      >
+                        <div className="flex items-start gap-3 min-w-0 flex-1">
+                          <div
+                            className={cn(
+                              'flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-xs font-semibold',
+                              unit.category === 'hall' && 'bg-teal-500/10 text-teal-800 dark:text-teal-300 border border-teal-500/20',
+                              unit.category === 'department' && 'bg-blue-500/10 text-blue-800 dark:text-blue-300 border border-blue-500/20',
+                              unit.category === 'administrative' && 'bg-purple-500/10 text-purple-800 dark:text-purple-300 border border-purple-500/20'
+                            )}
+                          >
+                            {unit.category === 'hall' && <Home className="h-4 w-4" />}
+                            {unit.category === 'department' && <GraduationCap className="h-4 w-4" />}
+                            {unit.category === 'administrative' && <Landmark className="h-4 w-4" />}
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <p className="font-medium text-foreground truncate" title={unit.name}>
+                              {unit.name}
+                            </p>
+                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                              <span
+                                className={cn(
+                                  'text-[10px] font-semibold px-2 py-0.5 rounded uppercase tracking-wider',
+                                  unit.category === 'hall' && 'bg-teal-500/10 text-teal-800 dark:text-teal-300',
+                                  unit.category === 'department' && 'bg-blue-500/10 text-blue-800 dark:text-blue-300',
+                                  unit.category === 'administrative' && 'bg-purple-500/10 text-purple-800 dark:text-purple-300'
+                                )}
+                              >
+                                {unit.category === 'hall'
+                                  ? 'Residence Hall'
+                                  : unit.category === 'department'
+                                  ? 'Department'
+                                  : 'Administrative'}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground font-mono">
+                                {registeredCount} user{registeredCount === 1 ? '' : 's'}
+                              </span>
+                              {ticketCount > 0 && (
+                                <span className="text-[10px] text-muted-foreground font-mono">
+                                  • {ticketCount} ticket{ticketCount === 1 ? '' : 's'}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+                            onClick={() => openEditUnit(unit)}
+                            title="Edit Unit"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeletingUnit(unit)}
+                            title="Delete Unit"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <DataPagination
+                currentPage={campusUnitsPagination.currentPage}
+                totalPages={campusUnitsPagination.totalPages}
+                totalItems={campusUnitsPagination.totalItems}
+                pageSize={campusUnitsPagination.pageSize}
+                onPageChange={campusUnitsPagination.setCurrentPage}
+                onPageSizeChange={campusUnitsPagination.setPageSize}
+                pageSizeOptions={[12, 24, 48]}
+                itemLabel="units"
+              />
+            </div>
+
+            {/* Edit Unit Modal */}
+            {editingUnit && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl space-y-4 animate-scale-in">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-heading text-lg font-semibold text-foreground">
+                      Edit Official Campus Unit
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={() => setEditingUnit(null)}
+                      className="rounded-lg p-1 text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="edit-unit-name" className="text-xs">
+                        Unit / Hall / Department Name
+                      </Label>
+                      <Input
+                        id="edit-unit-name"
+                        value={editUnitName}
+                        onChange={(e) => setEditUnitName(e.target.value)}
+                        className="text-sm"
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Category</Label>
+                      <Select
+                        value={editUnitCategory}
+                        onValueChange={(v) => setEditUnitCategory(v as CampusUnitCategory)}
+                      >
+                        <SelectTrigger className="text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="hall">Residence Hall</SelectItem>
+                          <SelectItem value="department">Academic Department</SelectItem>
+                          <SelectItem value="administrative">Administrative / General Unit</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2 border-t border-border">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setEditingUnit(null)}
+                      disabled={isSavingUnit}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleSaveUnit}
+                      disabled={!editUnitName.trim() || isSavingUnit}
+                    >
+                      {isSavingUnit ? (
+                        <>
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'Save Changes'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Delete Unit Confirmation Dialog */}
+            {deletingUnit && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+                <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-xl space-y-4 animate-scale-in">
+                  <div className="flex items-center gap-2 text-destructive">
+                    <AlertCircle className="h-5 w-5" />
+                    <h3 className="font-heading text-lg font-semibold text-foreground">
+                      Confirm Campus Unit Deletion
+                    </h3>
+                  </div>
+
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <p>
+                      Are you sure you want to remove <strong className="text-foreground">{deletingUnit.name}</strong> from the official campus registry?
+                    </p>
+                    {(() => {
+                      const linkedUsers = users.filter(
+                        (u) => (u.hall_or_dept || '').trim().toLowerCase() === deletingUnit.name.trim().toLowerCase()
+                      ).length;
+                      const linkedTickets = reports.filter(
+                        (r) => (r.hall || '').trim().toLowerCase() === deletingUnit.name.trim().toLowerCase()
+                      ).length;
+
+                      if (linkedUsers > 0 || linkedTickets > 0) {
+                        return (
+                          <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-xs text-amber-800 dark:text-amber-300">
+                            Notice: Currently <strong>{linkedUsers}</strong> user(s) and <strong>{linkedTickets}</strong> ticket(s) are associated with this unit. Removing it will omit it from future sign-ups and selection dropdowns.
+                          </p>
+                        );
+                      }
+                      return null;
+                    })()}
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2 border-t border-border">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setDeletingUnit(null)}
+                      disabled={isDeletingUnit}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={handleDeleteUnit}
+                      disabled={isDeletingUnit}
+                    >
+                      {isDeletingUnit ? (
+                        <>
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          Removing...
+                        </>
+                      ) : (
+                        'Remove Unit'
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          /* =====================================================================
+             SUB-TAB: SPECIFIC ROOMS & FACILITIES LOCATIONS
+             ===================================================================== */
+          <div className="space-y-6 animate-fade-in">
 
         {/* Add Location Form */}
         <div className="rounded-xl border border-border bg-card p-6 shadow-xs space-y-4">
@@ -2498,8 +2998,10 @@ export function AdminPanel({
           </div>
         )}
       </div>
-    );
-  }
+    )}
+  </div>
+);
+}
 
   // 5. SYSTEM AUDIT TRAIL VIEW
   if (view === 'audit') {

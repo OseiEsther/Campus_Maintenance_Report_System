@@ -8,6 +8,7 @@ import type {
   VerificationSignal,
   Notification,
   InternalNote,
+  CampusUnit,
 } from './types';
 
 export const mockUsers: User[] = [
@@ -17,7 +18,6 @@ export const mockUsers: User[] = [
     email: 'ama.mensah@st.university.edu.gh',
     hall_or_dept: 'Pentagon Hall',
     role: 'student',
-    tempPasskey: 'password123',
   },
   {
     id: 'u2',
@@ -25,7 +25,6 @@ export const mockUsers: User[] = [
     email: 'kwabena.owusu@st.university.edu.gh',
     hall_or_dept: 'Republic Hall',
     role: 'student',
-    tempPasskey: 'password123',
   },
   {
     id: 'u3',
@@ -33,7 +32,6 @@ export const mockUsers: User[] = [
     email: 'akosua.frimpong@st.university.edu.gh',
     hall_or_dept: 'Independence Hall',
     role: 'student',
-    tempPasskey: 'password123',
   },
   {
     id: 'u4',
@@ -41,7 +39,6 @@ export const mockUsers: User[] = [
     email: 'yaw.boateng@st.university.edu.gh',
     hall_or_dept: 'Continental Hall',
     role: 'student',
-    tempPasskey: 'password123',
   },
   {
     id: 'u5',
@@ -49,7 +46,6 @@ export const mockUsers: User[] = [
     email: 'esi.ansah@st.university.edu.gh',
     hall_or_dept: 'SRC Office',
     role: 'rep',
-    tempPasskey: 'password123',
   },
   {
     id: 'u6',
@@ -58,7 +54,6 @@ export const mockUsers: User[] = [
     hall_or_dept: 'Maintenance Unit',
     role: 'staff',
     requiresPasswordChange: true,
-    tempPasskey: 'STAFF-5520',
     onboardedAt: '2026-09-06T10:00:00Z',
   },
   {
@@ -67,7 +62,6 @@ export const mockUsers: User[] = [
     email: 'grace.adjei@st.university.edu.gh',
     hall_or_dept: 'Student Affairs',
     role: 'admin',
-    tempPasskey: 'password123',
   },
 ];
 
@@ -103,6 +97,7 @@ export const mockReports: Report[] = [
       'One of the shower heads in the common bathroom has been leaking continuously for three days. The floor is constantly wet and slippery, making it unsafe especially at night. Water is pooling near the drain and not draining properly.',
     photo_url: 'https://images.pexels.com/photos/6899476/pexels-photo-6899476.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'open',
+    priority: 'high',
     verification_score: 7,
     created_at: '2026-09-01T08:30:00Z',
   },
@@ -117,6 +112,7 @@ export const mockReports: Report[] = [
       'There is a large crack in the stairwell wall on the second floor landing. Pieces of plaster have fallen off and the crack appears to be widening. This could be a safety hazard if left unaddressed.',
     photo_url: 'https://images.pexels.com/photos/533889/pexels-photo-533889.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'in_progress',
+    priority: 'urgent',
     verification_score: 12,
     created_at: '2026-08-28T14:15:00Z',
   },
@@ -131,6 +127,7 @@ export const mockReports: Report[] = [
       'The ground floor restroom in the main library has been without soap and tissue paper for over a week. The hand dryer is also not working. Students are unable to maintain basic hygiene after using the facilities.',
     photo_url: null,
     status: 'resolved',
+    priority: 'medium',
     verification_score: 15,
     created_at: '2026-08-20T09:00:00Z',
   },
@@ -145,6 +142,7 @@ export const mockReports: Report[] = [
       'Several power outlets in Lecture Hall 3 of the Engineering Block are not working. This affects students who need to charge their laptops during lectures. At least 4 out of 12 outlets appear to be dead.',
     photo_url: 'https://images.pexels.com/photos/3973531/pexels-photo-3973531.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'open',
+    priority: 'medium',
     verification_score: 5,
     created_at: '2026-09-03T11:45:00Z',
   },
@@ -159,6 +157,7 @@ export const mockReports: Report[] = [
       'The main light in the shared kitchen area of Independence Hall keeps flickering on and off. It has been getting worse over the past week and now goes completely dark for several seconds at a time. This is a safety concern for students cooking in the evening.',
     photo_url: 'https://images.pexels.com/photos/3973531/pexels-photo-3973531.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'in_progress',
+    priority: 'high',
     verification_score: 9,
     created_at: '2026-08-30T17:20:00Z',
   },
@@ -173,6 +172,7 @@ export const mockReports: Report[] = [
       'Several tables in the Central Cafeteria dining area have not been cleaned properly. There are food remnants and sticky surfaces on at least 6 tables near the entrance. This has been ongoing for two days.',
     photo_url: null,
     status: 'open',
+    priority: 'low',
     verification_score: 3,
     created_at: '2026-09-05T12:00:00Z',
   },
@@ -187,6 +187,7 @@ export const mockReports: Report[] = [
       'Two of the four shower stalls in the Sports Complex changing room have no hot water. The water goes from cold to freezing within seconds. This has been reported verbally to the sports office but nothing has been done.',
     photo_url: 'https://images.pexels.com/photos/6899476/pexels-photo-6899476.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'open',
+    priority: 'medium',
     verification_score: 6,
     created_at: '2026-09-04T06:30:00Z',
   },
@@ -201,6 +202,7 @@ export const mockReports: Report[] = [
       'A ceiling panel in the 2nd floor reading room of the Main Library is sagging and looks like it could fall. It is directly above the study tables near the window. Students have moved to other areas out of caution.',
     photo_url: 'https://images.pexels.com/photos/533889/pexels-photo-533889.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'in_progress',
+    priority: 'urgent',
     verification_score: 10,
     created_at: '2026-08-27T10:00:00Z',
   },
@@ -215,6 +217,7 @@ export const mockReports: Report[] = [
       'The door handle to Room 204 in Pentagon Hall is loose and comes off when pulled. The lock mechanism also sticks, making it difficult to secure the room. This has been an issue for the past week.',
     photo_url: null,
     status: 'resolved',
+    priority: 'low',
     verification_score: 8,
     created_at: '2026-08-18T15:30:00Z',
   },
@@ -229,6 +232,7 @@ export const mockReports: Report[] = [
       'The kitchen sink in the Central Cafeteria is blocked and water backs up when in use. There is also a noticeable odor coming from the drain. This affects food preparation and hygiene standards.',
     photo_url: 'https://images.pexels.com/photos/6899476/pexels-photo-6899476.jpeg?auto=compress&cs=tinysrgb&w=600',
     status: 'open',
+    priority: 'medium',
     verification_score: 4,
     created_at: '2026-09-06T07:45:00Z',
   },
@@ -346,5 +350,36 @@ export const mockInternalNotes: InternalNote[] = [
     text: 'Replacement ballast and LED tube ordered from central warehouse. ETA 24 hours.',
     created_at: '2026-09-02T09:30:00Z',
   },
+];
+
+export const mockCampusUnits: CampusUnit[] = [
+  // Residence Halls
+  { id: 'cu-h1', name: 'Pentagon Hall', category: 'hall' },
+  { id: 'cu-h2', name: 'Republic Hall', category: 'hall' },
+  { id: 'cu-h3', name: 'Independence Hall', category: 'hall' },
+  { id: 'cu-h4', name: 'Continental Hall', category: 'hall' },
+  { id: 'cu-h5', name: 'Commonwealth Hall', category: 'hall' },
+  { id: 'cu-h6', name: 'Legon Hall', category: 'hall' },
+  { id: 'cu-h7', name: 'Jean Nelson Aka Hall', category: 'hall' },
+  { id: 'cu-h8', name: 'Alexander Kwapong Hall', category: 'hall' },
+  { id: 'cu-h9', name: 'Jubilee Hall', category: 'hall' },
+  { id: 'cu-h10', name: 'Elizabeth Frances Sey Hall', category: 'hall' },
+
+  // Academic Departments
+  { id: 'cu-d1', name: 'Computer Science & IT', category: 'department' },
+  { id: 'cu-d2', name: 'Electrical & Electronic Engineering', category: 'department' },
+  { id: 'cu-d3', name: 'Mechanical & Civil Engineering', category: 'department' },
+  { id: 'cu-d4', name: 'Business Administration & Accounting', category: 'department' },
+  { id: 'cu-d5', name: 'Faculty of Law', category: 'department' },
+  { id: 'cu-d6', name: 'School of Medicine & Health Sciences', category: 'department' },
+  { id: 'cu-d7', name: 'Biological & Physical Sciences', category: 'department' },
+  { id: 'cu-d8', name: 'Humanities & Social Sciences', category: 'department' },
+
+  // Administrative & General Units
+  { id: 'cu-a1', name: 'Student Affairs & SRC', category: 'administrative' },
+  { id: 'cu-a2', name: 'Physical Development & Municipal Services', category: 'administrative' },
+  { id: 'cu-a3', name: 'Academic Affairs', category: 'administrative' },
+  { id: 'cu-a4', name: 'Library & Archives', category: 'administrative' },
+  { id: 'cu-a5', name: 'Central Administration', category: 'administrative' },
 ];
 

@@ -45,7 +45,7 @@ import { ErrorState } from '@/components/shared/empty-states';
 import { categoryLabel, daysSince, formatDate, formatWorkOrderToken, matchTicketSearch } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { DataPagination, usePagination } from '@/components/shared/data-pagination';
-import type { Report, ReportStatus, Category } from '@/lib/types';
+import type { Report, ReportStatus, Category, ReportPriority } from '@/lib/types';
 
 type SortField = 'score' | 'location' | 'category' | 'created' | 'status';
 type SortDir = 'asc' | 'desc';
@@ -551,10 +551,13 @@ function StaffReportRow({
     addInternalNote,
     updateInternalNote,
     deleteInternalNote,
+    updateReportPriority,
+    assignReportTechnician,
   } = useData();
 
   const notes = getInternalNotesByReport(report.id);
   const [draftNote, setDraftNote] = useState('');
+  const [techInput, setTechInput] = useState(report.assigned_to || '');
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
 
@@ -606,6 +609,27 @@ function StaffReportRow({
             <p className="text-[11px] text-muted-foreground line-clamp-1 pl-0.5">
               {report.description}
             </p>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+              <span
+                className={cn(
+                  'text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded border tracking-wider',
+                  report.priority === 'urgent'
+                    ? 'bg-red-500/10 text-red-600 border-red-500/30 dark:text-red-400'
+                    : report.priority === 'high'
+                    ? 'bg-amber-500/10 text-amber-600 border-amber-500/30 dark:text-amber-400'
+                    : report.priority === 'low'
+                    ? 'bg-zinc-500/10 text-zinc-600 border-zinc-500/30 dark:text-zinc-400'
+                    : 'bg-blue-500/10 text-blue-600 border-blue-500/30 dark:text-blue-400'
+                )}
+              >
+                {report.priority || 'medium'}
+              </span>
+              {report.assigned_to && (
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  Tech: {report.assigned_to}
+                </span>
+              )}
+            </div>
           </div>
         </TableCell>
         <TableCell className="w-[14%] min-w-[120px] text-xs capitalize text-muted-foreground whitespace-nowrap">
@@ -698,6 +722,60 @@ function StaffReportRow({
                 >
                   Close
                 </button>
+              </div>
+
+              {/* Work Order Dispatch & Triage Controls */}
+              <div className="rounded-lg border border-border bg-card p-3 shadow-2xs space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-foreground">
+                    Work Order Dispatch &amp; Triage
+                  </span>
+                  <span className="text-[10px] text-muted-foreground font-mono">
+                    Token: {formatWorkOrderToken(report.id)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">
+                      Triage Priority Level
+                    </label>
+                    <Select
+                      value={report.priority || 'medium'}
+                      onValueChange={(val) => updateReportPriority(report.id, val as ReportPriority)}
+                    >
+                      <SelectTrigger className="h-8 text-xs bg-background">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="low">Low Priority</SelectItem>
+                        <SelectItem value="medium">Medium Priority</SelectItem>
+                        <SelectItem value="high">High Priority</SelectItem>
+                        <SelectItem value="urgent">Urgent</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[11px] font-medium text-muted-foreground">
+                      Assigned Field Technician
+                    </label>
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder="e.g. Kwesi Mensah"
+                        value={techInput}
+                        onChange={(e) => setTechInput(e.target.value)}
+                        className="h-8 text-xs bg-background"
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 text-xs shrink-0"
+                        onClick={() => assignReportTechnician(report.id, techInput.trim() || null)}
+                      >
+                        Save
+                      </Button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               {/* Existing notes list */}

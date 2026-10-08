@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ArrowLeft,
   MapPin,
@@ -9,16 +9,27 @@ import {
   Check,
   CheckCircle2,
   Send,
+  Wrench,
 } from 'lucide-react';
 import { useData } from '@/lib/data-context';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { StatusBadge } from '@/components/shared/status-badge';
 import { SignalMeter, VerificationBreakdown } from '@/components/shared/signal-meter';
 import { CategoryIcon } from '@/components/shared/category-icon';
 import { ReportDetailSkeleton } from '@/components/shared/loading-skeletons';
 import { ErrorState } from '@/components/shared/empty-states';
+import { cn } from '@/lib/utils';
+import type { ReportPriority } from '@/lib/types';
 import {
   Accordion,
   AccordionItem,
@@ -52,6 +63,8 @@ export function ReportDetail({
     hasRepConfirmed,
     corroborateReport,
     addComment,
+    updateReportPriority,
+    assignReportTechnician,
     currentUser,
     loading,
     error,
@@ -59,11 +72,19 @@ export function ReportDetail({
 
   const [commentText, setCommentText] = useState('');
   const [corroborating, setCorroborating] = useState(false);
+  const [techInput, setTechInput] = useState('');
+
+  const report = getReportById(reportId);
+
+  useEffect(() => {
+    if (report?.assigned_to !== undefined) {
+      setTechInput(report.assigned_to || '');
+    }
+  }, [report?.assigned_to]);
 
   if (loading) return <ReportDetailSkeleton />;
   if (error) return <ErrorState />;
 
-  const report = getReportById(reportId);
   if (!report) {
     return (
       <ErrorState
@@ -117,6 +138,20 @@ export function ReportDetail({
             {formatWorkOrderToken(report.id)}
           </span>
           <StatusBadge status={report.status} />
+          <span
+            className={cn(
+              'text-[10px] font-semibold uppercase px-2 py-0.5 rounded border tracking-wider',
+              report.priority === 'urgent'
+                ? 'bg-red-500/10 text-red-600 border-red-500/30 dark:text-red-400'
+                : report.priority === 'high'
+                ? 'bg-amber-500/10 text-amber-600 border-amber-500/30 dark:text-amber-400'
+                : report.priority === 'low'
+                ? 'bg-zinc-500/10 text-zinc-600 border-zinc-500/30 dark:text-zinc-400'
+                : 'bg-blue-500/10 text-blue-600 border-blue-500/30 dark:text-blue-400'
+            )}
+          >
+            {report.priority || 'medium'} priority
+          </span>
           <SignalMeter score={report.verification_score} size="md" showNumber />
           <span className="inline-flex items-center gap-1 text-[11px] font-medium text-zinc-600 dark:text-zinc-400 bg-zinc-50 dark:bg-zinc-800/60 px-2 py-0.5 rounded border border-border/80">
             <CategoryIcon category={report.category} className="h-3 w-3" />
@@ -126,6 +161,11 @@ export function ReportDetail({
             <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 text-xs font-semibold border border-emerald-200 dark:border-emerald-800/60">
               <CheckCircle2 className="h-3.5 w-3.5" />
               Verified by Rep
+            </span>
+          )}
+          {report.assigned_to && (
+            <span className="font-mono text-[11px] text-muted-foreground bg-muted px-2 py-0.5 rounded border border-border">
+              Assigned: {report.assigned_to}
             </span>
           )}
         </div>
@@ -161,6 +201,60 @@ export function ReportDetail({
           alt="Report photo"
           className="h-56 w-full max-w-lg rounded-lg border border-border object-cover"
         />
+      )}
+
+      {/* Facilities Staff Work Order Triage */}
+      {(currentUser.role === 'staff' || currentUser.role === 'admin') && (
+        <div className="rounded-lg border border-border bg-card p-4 shadow-2xs space-y-3">
+          <div className="flex items-center gap-2 border-b border-border/80 pb-2">
+            <Wrench className="h-4 w-4 text-primary" />
+            <h3 className="text-xs font-semibold text-foreground uppercase tracking-wider">
+              Facilities Work Order Management
+            </h3>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-muted-foreground">
+                Priority Level
+              </label>
+              <Select
+                value={report.priority || 'medium'}
+                onValueChange={(val) => updateReportPriority(report.id, val as ReportPriority)}
+              >
+                <SelectTrigger className="h-8 text-xs bg-background">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="low">Low Priority</SelectItem>
+                  <SelectItem value="medium">Medium Priority</SelectItem>
+                  <SelectItem value="high">High Priority</SelectItem>
+                  <SelectItem value="urgent">Urgent</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-[11px] font-medium text-muted-foreground">
+                Assigned Technician
+              </label>
+              <div className="flex gap-2">
+                <Input
+                  placeholder="e.g. Kwesi Mensah"
+                  value={techInput}
+                  onChange={(e) => setTechInput(e.target.value)}
+                  className="h-8 text-xs bg-background"
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs shrink-0"
+                  onClick={() => assignReportTechnician(report.id, techInput.trim() || null)}
+                >
+                  Save
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Corroborate button */}

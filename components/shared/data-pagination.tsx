@@ -31,11 +31,10 @@ export function usePagination<T>(
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(initialPageSize);
 
-  // Automatically reset to page 1 when resetDeps change (e.g. search query, active filter tab)
-  const resetDeps = options?.resetDeps;
   useEffect(() => {
     setCurrentPage(1);
-  }, resetDeps ?? []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, options?.resetDeps ?? []);
 
   const totalItems = items.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));

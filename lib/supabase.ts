@@ -1,19 +1,20 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl =
-  process.env.NEXT_PUBLIC_SUPABASE_URL ||
-  process.env.VITE_SUPABASE_URL ||
-  'https://auedssowxperapcdkuaf.supabase.co';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-const supabaseAnonKey =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF1ZWRzc293eHBlcmFwY2RrdWFmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwODI0MDEsImV4cCI6MjEwNDY1ODQwMX0.PXBJ18Gt1C3HWRQ6anXEeFh4yj-UwtZqENjouF6L4uE';
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.warn(
+    'Warning: Supabase credentials are not configured in environment variables. ' +
+    'Please set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'
+  );
+}
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+export const supabase = createClient(supabaseUrl || 'https://placeholder.supabase.co', supabaseAnonKey || 'placeholder', {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
+    detectSessionInUrl: true,
   },
   realtime: {
     params: {
@@ -22,17 +23,14 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   },
 });
 
-
-
-
 const MAX_PHOTO_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
 
 /**
  * Upload an incident photo directly to the Supabase Storage bucket ('report-photos').
- * Returns the public URL of the uploaded image, or falls back to a temporary object URL.
+ * Scoped to user folder for RLS compliance: {userId}/{timestamp}-{filename}
+ * Throws on failure to avoid saving local blob URLs.
  */
-export async function uploadReportPhoto(file: File): Promise<string> {
-  // Client-side format and size validation
+export async function uploadReportPhoto(file: File, userId?: string): Promise<string> {
   if (!file.type.startsWith('image/')) {
     throw new Error('Please select a valid image file (PNG, JPG, WebP, GIF, HEIC).');
   }
@@ -41,30 +39,29 @@ export async function uploadReportPhoto(file: File): Promise<string> {
     throw new Error('Image size exceeds the 10 MB limit. Please select a smaller photo.');
   }
 
-  try {
-    const fileExt = file.name.split('.').pop() || 'jpg';
-    const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const filePath = `reports/${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${sanitizedName}`;
+  const userFolder = userId || 'public';
+  const fileExt = file.name.split('.').pop() || 'jpg';
+  const sanitizedName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
+  const filePath = `${userFolder}/${Date.now()}-${Math.random().toString(36).substring(2, 8)}-${sanitizedName}`;
 
-    const { error: uploadError } = await supabase.storage
-      .from('report-photos')
-      .upload(filePath, file, {
-        cacheControl: '3600',
-        upsert: false,
-        contentType: file.type || 'image/jpeg',
-      });
+  const { error: uploadError } = await supabase.storage
+    .from('report-photos')
+    .upload(filePath, file, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: file.type || 'image/jpeg',
+    });
 
-    if (uploadError) {
-      console.warn('Supabase storage upload returned notice, using local object preview:', uploadError.message);
-      return URL.createObjectURL(file);
-    }
-
-    const { data } = supabase.storage.from('report-photos').getPublicUrl(filePath);
-    return data?.publicUrl || URL.createObjectURL(file);
-  } catch (err) {
-    console.warn('Could not upload to Supabase storage, using fallback preview:', err);
-    return URL.createObjectURL(file);
+  if (uploadError) {
+    throw new Error(`Photo upload failed: ${uploadError.message}`);
   }
+
+  const { data } = supabase.storage.from('report-photos').getPublicUrl(filePath);
+  if (!data?.publicUrl) {
+    throw new Error('Could not retrieve public URL for uploaded photo.');
+  }
+
+  return data.publicUrl;
 }
 
 /**
@@ -92,7 +89,7 @@ export async function deleteReportPhoto(photoUrl: string): Promise<boolean> {
 }
 
 /**
- * Quick check to determine if the Supabase instance is reachable and the database tables are ready.
+ * Quick check to determine if the Supabase instance is reachable.
  */
 export async function checkSupabaseHealth(): Promise<{
   ok: boolean;
@@ -100,7 +97,15 @@ export async function checkSupabaseHealth(): Promise<{
   error?: string;
 }> {
   try {
-    const { data, error } = await supabase
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return {
+        ok: false,
+        hasTables: false,
+        error: 'Missing Supabase environment variables (NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY).',
+      };
+    }
+
+    const { error } = await supabase
       .from('locations')
       .select('id')
       .limit(1);
@@ -121,7 +126,7 @@ export async function checkSupabaseHealth(): Promise<{
     return {
       ok: false,
       hasTables: false,
-      error: err instanceof Error ? err.message : 'Unknown error',
+      error: err instanceof Error ? err.message : 'Unknown connection error',
     };
   }
 }

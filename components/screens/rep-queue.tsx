@@ -57,10 +57,9 @@ export function RepQueue({
   const [reviewTab, setReviewTab] = useState<'pending' | 'reviewed' | 'all'>('pending');
   const [search, setSearch] = useState('');
 
-  // Rep's primary hall keyword (e.g. "Pentagon", "Republic", "SRC")
-  const hallKeyword = useMemo(() => {
-    const parts = currentUser.hall_or_dept.split(' ');
-    return parts[0].toLowerCase();
+  // Rep's assigned hall (e.g. "Pentagon Hall", "Republic Hall")
+  const repHall = useMemo(() => {
+    return (currentUser.hall_or_dept || '').trim().toLowerCase();
   }, [currentUser.hall_or_dept]);
 
   const queue = useMemo(() => {
@@ -69,10 +68,10 @@ export function RepQueue({
       .sort((a, b) => b.verification_score - a.verification_score);
 
     if (scope === 'my_hall') {
-      const hallMatches = openReports.filter((r) =>
-        r.location_name.toLowerCase().includes(hallKeyword)
-      );
-      openReports = hallMatches.length > 0 ? hallMatches : openReports;
+      openReports = openReports.filter((r) => {
+        const reportHall = (r.hall || '').trim().toLowerCase();
+        return reportHall === repHall;
+      });
     }
 
     if (reviewTab === 'pending') {
@@ -93,7 +92,7 @@ export function RepQueue({
     }
 
     return openReports;
-  }, [reports, scope, hallKeyword, reviewTab, search, hasRepConfirmed, hasRepDisputed]);
+  }, [reports, scope, repHall, reviewTab, search, hasRepConfirmed, hasRepDisputed]);
 
   const pagination = usePagination(queue, {
     pageSize: 6,

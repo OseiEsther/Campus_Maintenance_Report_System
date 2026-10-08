@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   Mail,
   Lock,
@@ -12,21 +12,42 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  Building,
   GraduationCap,
-  Briefcase,
-  Check,
   Eye,
   EyeOff,
+  ShieldCheck,
+  Building,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useData } from '@/lib/data-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import type { Role } from '@/lib/types';
 
 const OTP_EXPIRY_SECONDS = 60;
+
+function getStudentDomainDisplay(): string {
+  const domainConfig = process.env.NEXT_PUBLIC_STUDENT_EMAIL_DOMAIN || '@st.university.edu.gh';
+  if (domainConfig === '*' || domainConfig === 'any') return 'Any email (Sandbox Mode)';
+  return domainConfig;
+}
+
+function isValidStudentEmail(email: string): boolean {
+  const domainConfig = process.env.NEXT_PUBLIC_STUDENT_EMAIL_DOMAIN || '@st.university.edu.gh';
+  if (domainConfig === '*' || domainConfig === 'any') return email.includes('@');
+  const allowedList = domainConfig.split(',').map((d) => d.trim().toLowerCase());
+  return allowedList.some((d) => email.endsWith(d.startsWith('@') ? d : `@${d}`));
+}
 
 export function AuthScreen({
   onLogin,
@@ -40,14 +61,26 @@ export function AuthScreen({
     isSignUp?: boolean
   ) => Promise<boolean | void> | void;
 }) {
-  const { error: dbError } = useData();
+  const { error: dbError, campusUnits } = useData();
   const [mode, setMode] = useState<'login' | 'signup'>('login');
+
+  const residenceHalls = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'hall'),
+    [campusUnits]
+  );
+  const academicDepts = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'department'),
+    [campusUnits]
+  );
+  const adminUnits = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'administrative'),
+    [campusUnits]
+  );
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [name, setName] = useState('');
   const [hall, setHall] = useState('');
-  const [signupRole, setSignupRole] = useState<'student' | 'staff'>('student');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -97,35 +130,17 @@ export function AuthScreen({
     if (!cleanEmail) {
       newErrors.email = 'Please enter your university email';
     } else if (mode === 'signup') {
-      if (signupRole === 'student') {
-        if (!cleanEmail.endsWith('@st.university.edu.gh')) {
-          const msg =
-            'Student accounts must use an official student email address (@st.university.edu.gh)';
-          newErrors.email = msg;
-          toast.error('Domain Role Mismatch', {
-            description: msg,
-          });
-        }
-      } else if (signupRole === 'staff') {
-        if (
-          !cleanEmail.endsWith('@university.edu.gh') ||
-          cleanEmail.includes('@st.')
-        ) {
-          const msg =
-            'Staff accounts must use an official staff email address (@university.edu.gh, not student domain)';
-          newErrors.email = msg;
-          toast.error('Domain Role Mismatch', {
-            description: msg,
-          });
-        }
+      if (!isValidStudentEmail(cleanEmail)) {
+        const expected = getStudentDomainDisplay();
+        const msg = `Student accounts must use an authorized student email (${expected})`;
+        newErrors.email = msg;
+        toast.error('Domain Verification Required', {
+          description: msg,
+        });
       }
     } else {
-      if (
-        !cleanEmail.includes('@') ||
-        (!cleanEmail.endsWith('university.edu.gh') && !cleanEmail.endsWith('.gh'))
-      ) {
-        newErrors.email =
-          'Please enter a valid university email address (@st.university.edu.gh or @university.edu.gh)';
+      if (!cleanEmail.includes('@')) {
+        newErrors.email = 'Please enter a valid email address';
       }
     }
 
@@ -134,11 +149,9 @@ export function AuthScreen({
     } else if (password.length < 6) {
       newErrors.password = 'Password must be at least 6 characters';
     }
+
     if (mode === 'signup' && !hall.trim()) {
-      newErrors.hall =
-        signupRole === 'student'
-          ? 'Please enter your assigned residence hall or block'
-          : 'Please enter your department or maintenance unit';
+      newErrors.hall = 'Please enter your assigned residence hall or department';
     }
 
     setErrors(newErrors);
@@ -149,7 +162,7 @@ export function AuthScreen({
     } else {
       setIsSubmitting(true);
       try {
-        await onLogin(email.trim(), password.trim());
+        await onLogin(cleanEmail, password.trim());
       } catch (err: any) {
         const msg = err.message || 'Login failed. Please check your credentials.';
         toast.error('Authentication Notice', {
@@ -170,18 +183,18 @@ export function AuthScreen({
     }
 
     if (enteredOtp.trim() !== generatedOtp) {
-      setOtpError('Incorrect verification code. Please check your toast message.');
+      setOtpError('Incorrect verification code. Please check your notification.');
       return;
     }
 
     setIsSubmitting(true);
     try {
       await onLogin(
-        email.trim(),
+        email.trim().toLowerCase(),
         password.trim(),
         name.trim(),
         hall.trim(),
-        signupRole,
+        'student',
         true
       );
       toast.success('Registration verified!', {
@@ -379,7 +392,7 @@ export function AuthScreen({
                       : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  Create Account
+                  Create Student Account
                 </button>
               </div>
 
@@ -404,70 +417,19 @@ export function AuthScreen({
                       )}
                     </div>
 
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs font-semibold text-foreground">
-                          Institutional Role
-                        </Label>
-                        <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border">
-                          {signupRole === 'student'
-                            ? '@st.university.edu.gh'
-                            : '@university.edu.gh'}
-                        </span>
-                      </div>
-
-                      {/* Tab selection per role */}
-                      <div className="inline-flex w-full rounded-lg border border-border/80 bg-muted/40 p-1 shadow-2xs">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSignupRole('student');
-                            if (errors.email)
-                              setErrors((prev) => ({ ...prev, email: '' }));
-                          }}
-                          className={`flex flex-1 items-center justify-center gap-2 rounded-md py-2 text-xs font-semibold transition-all ${
-                            signupRole === 'student'
-                              ? 'bg-card text-foreground shadow-xs'
-                              : 'text-muted-foreground hover:text-foreground'
-                          }`}
-                        >
-                          <GraduationCap className="h-4 w-4" />
-                          <span>Student</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSignupRole('staff');
-                            if (errors.email)
-                              setErrors((prev) => ({ ...prev, email: '' }));
-                          }}
-                          className={`flex flex-1 items-center justify-center gap-2 rounded-md py-2 text-xs font-semibold transition-all ${
-                            signupRole === 'staff'
-                              ? 'bg-card text-foreground shadow-xs'
-                              : 'text-muted-foreground hover:text-foreground'
-                          }`}
-                        >
-                          <Briefcase className="h-4 w-4" />
-                          <span>University Staff</span>
-                        </button>
-                      </div>
-
-                      <p className="text-[11px] text-muted-foreground">
-                        {signupRole === 'student'
-                          ? 'Enrolled student reporting facility issues. Requires @st.university.edu.gh email.'
-                          : 'Institution & facilities personnel. Requires @university.edu.gh staff email.'}
-                      </p>
-                      {signupRole === 'student' && (
-                        <p className="text-[11px] text-muted-foreground/80 italic">
-                          Note: Hall Representatives apply through their student profile settings for administrator review.
-                        </p>
-                      )}
+                    <div className="rounded-lg border border-border/70 bg-muted/30 p-2.5 text-xs text-muted-foreground flex items-center gap-2">
+                      <GraduationCap className="h-4 w-4 text-primary shrink-0" />
+                      <span>
+                        Account role: <strong className="text-foreground">Student</strong>. University staff accounts are provisioned directly by Facilities Administration.
+                      </span>
                     </div>
                   </>
                 )}
 
                 <div className="space-y-2">
-                  <Label htmlFor="email">University Email</Label>
+                  <Label htmlFor="email">
+                    {mode === 'signup' ? 'Student University Email' : 'University Email'}
+                  </Label>
                   <div className="relative">
                     <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
@@ -476,9 +438,7 @@ export function AuthScreen({
                       autoComplete="email"
                       placeholder={
                         mode === 'signup'
-                          ? signupRole === 'student'
-                            ? 'student.id@st.university.edu.gh'
-                            : 'staff.name@university.edu.gh'
+                          ? 'student.id@st.university.edu.gh'
                           : 'name@st.university.edu.gh or @university.edu.gh'
                       }
                       value={email}
@@ -494,10 +454,8 @@ export function AuthScreen({
                   ) : (
                     <p className="text-xs text-muted-foreground">
                       {mode === 'login'
-                        ? 'Enter your registered university email'
-                        : signupRole === 'student'
-                        ? 'Must end with @st.university.edu.gh'
-                        : 'Must end with @university.edu.gh'}
+                        ? 'Enter your registered email address'
+                        : `Authorized domain: ${getStudentDomainDisplay()}`}
                     </p>
                   )}
                 </div>
@@ -538,17 +496,75 @@ export function AuthScreen({
 
                 {mode === 'signup' && (
                   <div className="space-y-2">
-                    <Label htmlFor="hall">Hall or Department</Label>
-                    <Input
-                      id="hall"
-                      autoComplete="organization"
-                      placeholder="e.g. Pentagon Hall, Computer Science"
+                    <Label htmlFor="hall-select">Residence Hall or Academic Department</Label>
+                    <Select
                       value={hall}
-                      onChange={(e) => setHall(e.target.value)}
-                    />
+                      onValueChange={(val) => {
+                        setHall(val);
+                        if (errors.hall) setErrors((prev) => ({ ...prev, hall: '' }));
+                      }}
+                    >
+                      <SelectTrigger id="hall-select" className="w-full text-xs">
+                        <SelectValue placeholder="Select official residence hall or department" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-72">
+                        {residenceHalls.length > 0 && (
+                          <SelectGroup>
+                            <SelectLabel className="text-xs font-semibold text-primary">
+                              Residence Halls
+                            </SelectLabel>
+                            {residenceHalls.map((u) => (
+                              <SelectItem key={u.id} value={u.name} className="text-xs">
+                                {u.name}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        )}
+                        {academicDepts.length > 0 && (
+                          <SelectGroup>
+                            <SelectLabel className="text-xs font-semibold text-primary">
+                              Academic Departments
+                            </SelectLabel>
+                            {academicDepts.map((u) => (
+                              <SelectItem key={u.id} value={u.name} className="text-xs">
+                                {u.name}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        )}
+                        {adminUnits.length > 0 && (
+                          <SelectGroup>
+                            <SelectLabel className="text-xs font-semibold text-primary">
+                              Administrative &amp; General Units
+                            </SelectLabel>
+                            {adminUnits.map((u) => (
+                              <SelectItem key={u.id} value={u.name} className="text-xs">
+                                {u.name}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        )}
+                      </SelectContent>
+                    </Select>
                     {errors.hall && (
                       <p className="text-xs text-destructive">{errors.hall}</p>
                     )}
+                    <p className="text-[11px] text-muted-foreground">
+                      Select from official university residence halls and departments to ensure correct report routing.
+                    </p>
+                  </div>
+                )}
+
+                {/* Privacy Notice Box at Sign Up */}
+                {mode === 'signup' && (
+                  <div className="rounded-lg border border-border/80 bg-muted/20 p-3 text-[11px] text-muted-foreground space-y-1">
+                    <div className="flex items-center gap-1.5 font-semibold text-foreground">
+                      <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+                      <span>Privacy Notice</span>
+                    </div>
+                    <p>
+                      Incident reports, descriptions, and uploaded photos are shared on the public campus feed to aid university facility repairs. Your email address remains private and visible only to system administrators.
+                    </p>
                   </div>
                 )}
 

@@ -27,6 +27,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { roleLabel, formatDate } from '@/lib/format';
 import type { Role } from '@/lib/types';
 
@@ -44,16 +53,33 @@ export function ProfileSettings({ onLogout }: { onLogout?: () => void }) {
   const {
     currentUser,
     setCurrentUser,
+    updateUserProfile,
     logout,
     changePassword,
     hallRepRequests,
     submitHallRepRequest,
     revokeHallRepStatus,
+    campusUnits,
   } = useData();
+
+  const residenceHalls = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'hall'),
+    [campusUnits]
+  );
+  const academicDepts = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'department'),
+    [campusUnits]
+  );
+  const adminUnits = useMemo(
+    () => (campusUnits || []).filter((u) => u.category === 'administrative'),
+    [campusUnits]
+  );
+
   const [name, setName] = useState(currentUser.name);
   const [hall, setHall] = useState(currentUser.hall_or_dept);
   const [email] = useState(currentUser.email);
   const [saved, setSaved] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
 
   // Hall Rep Application modal and state
   const [showAppModal, setShowAppModal] = useState(false);
@@ -133,17 +159,28 @@ export function ProfileSettings({ onLogout }: { onLogout?: () => void }) {
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [pwdError, setPwdError] = useState('');
 
-  const handleSave = () => {
-    setCurrentUser({
-      ...currentUser,
-      name,
-      hall_or_dept: hall,
-    });
-    setSaved(true);
-    toast.success('Profile Saved', {
-      description: 'Your profile information has been updated.',
-    });
-    setTimeout(() => setSaved(false), 2000);
+  const handleSave = async () => {
+    const cleanName = name.trim();
+    if (!cleanName) {
+      toast.error('Name cannot be empty.');
+      return;
+    }
+
+    setIsSavingProfile(true);
+    try {
+      await updateUserProfile(currentUser.id, {
+        name: cleanName,
+        hall_or_dept: hall,
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err: any) {
+      toast.error('Failed to Save Profile', {
+        description: err.message || 'Could not update profile in database.',
+      });
+    } finally {
+      setIsSavingProfile(false);
+    }
   };
 
   const handlePasswordUpdate = async (e: React.FormEvent) => {
@@ -209,9 +246,7 @@ export function ProfileSettings({ onLogout }: { onLogout?: () => void }) {
                 Temporary Onboarding Passkey Active: Action Required
               </h2>
               <p className="text-xs text-amber-800 leading-relaxed">
-                You are currently signed in with an administrator-issued temporary passkey (
-                <span className="font-mono font-semibold">{currentUser.tempPasskey}</span>
-                ). Please set your permanent university password below to secure your technician account.
+                You are currently signed in with an administrator-issued temporary password. Please set your permanent university password below to secure your technician account.
               </p>
             </div>
           </div>
@@ -336,21 +371,73 @@ export function ProfileSettings({ onLogout }: { onLogout?: () => void }) {
         </div>
 
         <div className="space-y-2">
-          <Label htmlFor="hall">Hall or Department</Label>
-          <div className="relative">
-            <Building className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              id="hall"
-              value={hall}
-              onChange={(e) => setHall(e.target.value)}
-              className="pl-9"
-            />
-          </div>
+          <Label htmlFor="hall-select">Hall or Department</Label>
+          <Select value={hall} onValueChange={setHall}>
+            <SelectTrigger id="hall-select" className="w-full text-xs">
+              <SelectValue placeholder="Select official residence hall or department" />
+            </SelectTrigger>
+            <SelectContent className="max-h-72">
+              {residenceHalls.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel className="text-xs font-semibold text-primary">
+                    Residence Halls
+                  </SelectLabel>
+                  {residenceHalls.map((u) => (
+                    <SelectItem key={u.id} value={u.name} className="text-xs">
+                      {u.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              {academicDepts.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel className="text-xs font-semibold text-primary">
+                    Academic Departments
+                  </SelectLabel>
+                  {academicDepts.map((u) => (
+                    <SelectItem key={u.id} value={u.name} className="text-xs">
+                      {u.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              {adminUnits.length > 0 && (
+                <SelectGroup>
+                  <SelectLabel className="text-xs font-semibold text-primary">
+                    Administrative &amp; General Units
+                  </SelectLabel>
+                  {adminUnits.map((u) => (
+                    <SelectItem key={u.id} value={u.name} className="text-xs">
+                      {u.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              )}
+              {hall && !campusUnits.some((u) => u.name === hall) && (
+                <SelectGroup>
+                  <SelectLabel className="text-xs font-semibold text-muted-foreground">
+                    Current Assigned
+                  </SelectLabel>
+                  <SelectItem value={hall} className="text-xs">
+                    {hall}
+                  </SelectItem>
+                </SelectGroup>
+              )}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Official campus unit registered for incident reporting and notifications
+          </p>
         </div>
 
         <div className="pt-2">
-          <Button onClick={handleSave} className="w-full sm:w-auto">
-            {saved ? (
+          <Button onClick={handleSave} disabled={isSavingProfile} className="w-full sm:w-auto">
+            {isSavingProfile ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving Changes...
+              </>
+            ) : saved ? (
               <>
                 <Check className="mr-2 h-4 w-4" />
                 Changes Saved
@@ -584,19 +671,38 @@ export function ProfileSettings({ onLogout }: { onLogout?: () => void }) {
 
             <form onSubmit={handleApplyRep} className="space-y-4">
               <div className="space-y-1.5">
-                <Label htmlFor="app-hall" className="text-xs font-semibold">
-                  Residence Hall / Block
+                <Label htmlFor="app-hall-select" className="text-xs font-semibold">
+                  Official Residence Hall
                 </Label>
-                <Input
-                  id="app-hall"
-                  placeholder="e.g. Pentagon Hall, Block C"
-                  value={appHall}
-                  onChange={(e) => setAppHall(e.target.value)}
-                  className="text-xs"
-                  required
-                />
+                <Select value={appHall} onValueChange={setAppHall}>
+                  <SelectTrigger id="app-hall-select" className="w-full text-xs">
+                    <SelectValue placeholder="Select official residence hall to represent" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-60">
+                    <SelectGroup>
+                      <SelectLabel className="text-xs font-semibold text-primary">
+                        Campus Residence Halls
+                      </SelectLabel>
+                      {residenceHalls.map((u) => (
+                        <SelectItem key={u.id} value={u.name} className="text-xs">
+                          {u.name}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                    {appHall && !residenceHalls.some((u) => u.name === appHall) && (
+                      <SelectGroup>
+                        <SelectLabel className="text-xs font-semibold text-muted-foreground">
+                          Other Assigned
+                        </SelectLabel>
+                        <SelectItem value={appHall} className="text-xs">
+                          {appHall}
+                        </SelectItem>
+                      </SelectGroup>
+                    )}
+                  </SelectContent>
+                </Select>
                 <p className="text-[11px] text-muted-foreground">
-                  The primary campus residence you reside in and wish to represent.
+                  The primary campus residence hall you reside in and wish to represent.
                 </p>
               </div>
 

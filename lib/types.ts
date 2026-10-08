@@ -41,6 +41,8 @@ export interface HallRepRequest {
   admin_notes?: string;
 }
 
+export type ReportPriority = 'low' | 'medium' | 'high' | 'urgent';
+
 export interface User {
   id: string;
   name: string;
@@ -48,16 +50,25 @@ export interface User {
   hall_or_dept: string;
   role: Role;
   requiresPasswordChange?: boolean;
-  tempPasskey?: string;
   onboardedAt?: string;
   is_banned?: boolean;
   ban_reason?: string;
+}
+
+export type CampusUnitCategory = 'hall' | 'department' | 'administrative';
+
+export interface CampusUnit {
+  id: string;
+  name: string;
+  category: CampusUnitCategory;
+  created_at?: string;
 }
 
 export interface Location {
   id: string;
   name: string;
   building_type: BuildingType;
+  hall?: string;
 }
 
 export interface Report {
@@ -66,10 +77,13 @@ export interface Report {
   student_name: string;
   location_id: string;
   location_name: string;
+  hall?: string;
   category: Category;
   description: string;
   photo_url: string | null;
   status: ReportStatus;
+  priority: ReportPriority;
+  assigned_to?: string | null;
   verification_score: number;
   is_archived?: boolean;
   archived_at?: string;
@@ -158,6 +172,7 @@ export interface DataContextValue {
   users: User[];
   reports: Report[];
   locations: Location[];
+  campusUnits: CampusUnit[];
   corroborations: Corroboration[];
   statusEvents: StatusEvent[];
   comments: Comment[];
@@ -170,10 +185,10 @@ export interface DataContextValue {
   addReport: (
     report: Omit<
       Report,
-      'id' | 'verification_score' | 'created_at' | 'status' | 'student_id' | 'student_name' | 'is_archived' | 'archived_at' | 'archived_reason'
-    >
-  ) => Report;
-  corroborateReport: (reportId: string) => void;
+      'id' | 'verification_score' | 'created_at' | 'status' | 'student_id' | 'student_name' | 'is_archived' | 'archived_at' | 'archived_reason' | 'priority'
+    > & { priority?: ReportPriority }
+  ) => Promise<Report>;
+  corroborateReport: (reportId: string) => Promise<void>;
   hasCorroborated: (reportId: string) => boolean;
   hasRepConfirmed: (reportId: string) => boolean;
   hasRepDisputed: (reportId: string) => boolean;
@@ -181,27 +196,38 @@ export interface DataContextValue {
     reportId: string,
     newStatus: ReportStatus,
     note: string
-  ) => void;
-  addComment: (reportId: string, text: string) => void;
-  addInternalNote: (reportId: string, note: string) => void;
-  updateInternalNote: (noteId: string, newText: string) => void;
-  deleteInternalNote: (noteId: string) => void;
+  ) => Promise<void>;
+  updateReportPriority: (
+    reportId: string,
+    priority: ReportPriority
+  ) => Promise<void>;
+  assignReportTechnician: (
+    reportId: string,
+    technician: string | null
+  ) => Promise<void>;
+  addComment: (reportId: string, text: string) => Promise<void>;
+  addInternalNote: (reportId: string, note: string) => Promise<void>;
+  updateInternalNote: (noteId: string, newText: string) => Promise<void>;
+  deleteInternalNote: (noteId: string) => Promise<void>;
   getInternalNotesByReport: (reportId: string) => InternalNote[];
-  confirmReport: (reportId: string) => void;
-  disputeReport: (reportId: string, reason: string) => void;
-  markNotificationsRead: () => void;
-  markNotificationAsRead: (id: string) => void;
-  updateUserRole: (userId: string, role: Role) => void;
+  confirmReport: (reportId: string) => Promise<void>;
+  disputeReport: (reportId: string, reason: string) => Promise<void>;
+  markNotificationsRead: () => Promise<void>;
+  markNotificationAsRead: (id: string) => Promise<void>;
+  updateUserRole: (userId: string, role: Role) => Promise<void>;
   onboardStaff: (
     name: string,
     email: string,
     department: string,
-    tempPasskey: string
-  ) => User;
+    initialPassword?: string
+  ) => Promise<User>;
   changePassword: (newPassword: string) => Promise<void>;
-  addLocation: (name: string, buildingType: BuildingType) => void;
+  addLocation: (name: string, buildingType: BuildingType, hall?: string) => Promise<void>;
   updateLocation: (id: string, name: string, buildingType: BuildingType) => Promise<void>;
   deleteLocation: (id: string) => Promise<void>;
+  addCampusUnit: (name: string, category: CampusUnitCategory) => Promise<CampusUnit>;
+  updateCampusUnit: (id: string, name: string, category: CampusUnitCategory) => Promise<void>;
+  deleteCampusUnit: (id: string) => Promise<void>;
   getReportById: (id: string) => Report | undefined;
   getStatusEventsByReport: (reportId: string) => StatusEvent[];
   getCommentsByReport: (reportId: string) => Comment[];

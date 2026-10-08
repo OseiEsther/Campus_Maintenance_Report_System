@@ -2,7 +2,7 @@
 // Notifications, Admin Panel, Settings) read from and write to this single shared DataContext.
 // Status changes, internal notes, and rep actions sync directly to Supabase with
 // Realtime subscriptions so all screens update live from one Postgres database.
-// This context operates strictly with live database data.
+// This context operates strictly with live database data and Supabase Auth.
 'use client';
 
 import React, {
@@ -12,11 +12,15 @@ import React, {
   useCallback,
   useEffect,
 } from 'react';
+import { toast } from 'sonner';
 import { MAX_VERIFICATION_SCORE } from './types';
 import type {
   User,
   Location,
+  CampusUnit,
+  CampusUnitCategory,
   Report,
+  ReportPriority,
   Corroboration,
   StatusEvent,
   Comment,
@@ -30,6 +34,7 @@ import type {
   HallRepRequestStatus,
   DataContextValue,
 } from './types';
+import { mockCampusUnits } from './fixtures';
 import { supabase } from './supabase';
 import { roleLabel } from './format';
 
@@ -49,65 +54,10 @@ function dbProfileToUser(p: any): User {
     hall_or_dept: p.hall_or_dept,
     role: p.role as Role,
     requiresPasswordChange: p.requires_password_change ?? false,
-    tempPasskey: p.temp_passkey ?? undefined,
     onboardedAt: p.onboarded_at ?? undefined,
     is_banned: p.is_banned ?? false,
     ban_reason: p.ban_reason ?? undefined,
   };
-}
-
-function userToDbProfile(u: User): Record<string, any> {
-  const profile: Record<string, any> = {
-    id: u.id,
-    name: u.name,
-    email: u.email,
-    hall_or_dept: u.hall_or_dept,
-    role: u.role,
-  };
-  if (u.requiresPasswordChange) profile.requires_password_change = true;
-  if (u.tempPasskey) profile.temp_passkey = u.tempPasskey;
-  if (u.onboardedAt) profile.onboarded_at = u.onboardedAt;
-  if (u.is_banned) profile.is_banned = true;
-  if (u.ban_reason) profile.ban_reason = u.ban_reason;
-  return profile;
-}
-
-async function safeInsertProfile(user: User): Promise<{ error: any }> {
-  const payload: Record<string, any> = userToDbProfile(user);
-
-  while (true) {
-    const { error } = await supabase.from('profiles').insert(payload);
-    if (!error) return { error: null };
-
-    // Auto-heal if database table is missing an optional column
-    const match = error.message?.match(/Could not find the '([^']+)' column/i);
-    if (match && match[1] && match[1] in payload) {
-      console.warn(`Column '${match[1]}' does not exist in public.profiles, retrying insert without it.`);
-      delete payload[match[1]];
-      continue;
-    }
-
-    return { error };
-  }
-}
-
-async function safeUpsertProfile(user: User): Promise<{ error: any }> {
-  const payload: Record<string, any> = userToDbProfile(user);
-
-  while (true) {
-    const { error } = await supabase.from('profiles').upsert(payload);
-    if (!error) return { error: null };
-
-    // Auto-heal if database table is missing an optional column
-    const match = error.message?.match(/Could not find the '([^']+)' column/i);
-    if (match && match[1] && match[1] in payload) {
-      console.warn(`Column '${match[1]}' does not exist in public.profiles, retrying upsert without it.`);
-      delete payload[match[1]];
-      continue;
-    }
-
-    return { error };
-  }
 }
 
 const DataContext = createContext<DataContextValue | null>(null);
@@ -117,6 +67,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [users, setUsers] = useState<User[]>([]);
   const [reports, setReports] = useState<Report[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
+  const [campusUnits, setCampusUnits] = useState<CampusUnit[]>(mockCampusUnits);
   const [corroborations, setCorroborations] = useState<Corroboration[]>([]);
   const [statusEvents, setStatusEvents] = useState<StatusEvent[]>([]);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -127,7 +78,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 1. Initial Load: Fetch live data strictly from Supabase
+  // 1. Initial Load: Fetch live data and restore real Supabase Auth session
   useEffect(() => {
     let isMounted = true;
 
@@ -144,6 +95,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           signalsRes,
           notificationsRes,
           repRequestsRes,
+          campusUnitsRes,
         ] = await Promise.all([
           supabase.from('reports').select('*').order('created_at', { ascending: false }),
           supabase.from('locations').select('*').order('name'),
@@ -155,6 +107,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           supabase.from('verification_signals').select('*'),
           supabase.from('notifications').select('*').order('created_at', { ascending: false }),
           supabase.from('hall_rep_requests').select('*').order('created_at', { ascending: false }),
+          supabase.from('campus_units').select('*').order('name'),
         ]);
 
         if (!isMounted) return;
@@ -172,26 +125,50 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const loadedUsers = (profilesRes.data || []).map(dbProfileToUser);
         setUsers(loadedUsers);
 
-        // Check active session from localStorage
-        const savedUserId =
-          typeof window !== 'undefined'
-            ? localStorage.getItem('campusfix_user_id')
-            : null;
+        // Restore real session strictly from Supabase Auth
+        const { data: sessionData } = await supabase.auth.getSession();
+        const authUser = sessionData?.session?.user;
 
-        if (savedUserId) {
-          const matched = loadedUsers.find((u) => u.id === savedUserId);
+        if (authUser) {
+          let matched = loadedUsers.find((u) => u.id === authUser.id);
+          if (!matched) {
+            const { data: p } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', authUser.id)
+              .maybeSingle();
+            if (p) matched = dbProfileToUser(p);
+          }
+
           if (matched) {
             if (!matched.is_banned) {
               setCurrentUser(matched);
             } else {
-              localStorage.removeItem('campusfix_user_id');
+              await supabase.auth.signOut();
               setCurrentUser(DEFAULT_USER);
             }
           }
         }
 
+        const dbLocations = (locationsRes.data || []) as Location[];
+        const dbUnits = (campusUnitsRes.data || []) as CampusUnit[];
 
-        setLocations((locationsRes.data || []) as Location[]);
+        if (dbUnits.length > 0) {
+          setCampusUnits(dbUnits);
+        }
+
+        if (dbLocations.length > 0) {
+          setLocations(dbLocations);
+        } else if (dbUnits.length > 0) {
+          const mappedLocs: Location[] = dbUnits.map((u) => ({
+            id: u.id,
+            name: u.name,
+            hall: u.name,
+            building_type: u.category === 'hall' ? 'residence' : u.category === 'department' ? 'academic' : 'administrative',
+            created_at: u.created_at || new Date().toISOString(),
+          }));
+          setLocations(mappedLocs);
+        }
         setReports((reportsRes.data || []) as Report[]);
         setCorroborations((corroborationsRes.data || []) as Corroboration[]);
         setStatusEvents((statusEventsRes.data || []) as StatusEvent[]);
@@ -235,6 +212,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
 
     loadData();
+
+    // Listen to Supabase Auth state changes
+    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!isMounted) return;
+      if (event === 'SIGNED_OUT' || !session?.user) {
+        setCurrentUser(DEFAULT_USER);
+      } else if (session?.user) {
+        const { data: p } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', session.user.id)
+          .maybeSingle();
+        if (p) {
+          const u = dbProfileToUser(p);
+          if (u.is_banned) {
+            await supabase.auth.signOut();
+            setCurrentUser(DEFAULT_USER);
+          } else {
+            setCurrentUser(u);
+          }
+        }
+      }
+    });
 
     // 2. Realtime Subscriptions for live Postgres synchronization
     const channel = supabase
@@ -363,6 +363,29 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       )
       .on(
         'postgres_changes',
+        { event: '*', schema: 'public', table: 'campus_units' },
+        (payload) => {
+          if (payload.eventType === 'INSERT') {
+            const row = payload.new as CampusUnit;
+            setCampusUnits((prev) => {
+              if (prev.some((u) => u.id === row.id)) return prev;
+              return [...prev, row].sort((a, b) => a.name.localeCompare(b.name));
+            });
+          } else if (payload.eventType === 'UPDATE') {
+            const updated = payload.new as CampusUnit;
+            setCampusUnits((prev) =>
+              prev
+                .map((u) => (u.id === updated.id ? { ...u, ...updated } : u))
+                .sort((a, b) => a.name.localeCompare(b.name))
+            );
+          } else if (payload.eventType === 'DELETE') {
+            const oldId = (payload.old as any).id;
+            setCampusUnits((prev) => prev.filter((u) => u.id !== oldId));
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
         { event: '*', schema: 'public', table: 'profiles' },
         (payload) => {
           if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
@@ -379,13 +402,15 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
             // If active user was banned by admin, automatically terminate session
             if (user.id === currentUser.id && user.is_banned) {
-              logout();
+              supabase.auth.signOut().catch(() => {});
+              setCurrentUser(DEFAULT_USER);
             }
           } else if (payload.eventType === 'DELETE') {
             const oldId = (payload.old as any).id;
             setUsers((prev) => prev.filter((u) => u.id !== oldId));
             if (oldId === currentUser.id) {
-              logout();
+              supabase.auth.signOut().catch(() => {});
+              setCurrentUser(DEFAULT_USER);
             }
           }
         }
@@ -415,6 +440,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       isMounted = false;
+      authListener.subscription.unsubscribe();
       supabase.removeChannel(channel);
     };
   }, [currentUser.id]);
@@ -474,7 +500,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const hasRepConfirmed = useCallback(
     (reportId: string) =>
       verificationSignals.some(
-        (s) => s.report_id === reportId && s.label.toLowerCase().includes('verified by rep')
+        (s) => s.report_id === reportId && s.label.toLowerCase().includes('rep')
       ),
     [verificationSignals]
   );
@@ -488,22 +514,27 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const addReport: DataContextValue['addReport'] = useCallback(
-    (input) => {
-      const newId = `r${Date.now()}`;
+    async (input) => {
+      const newId = crypto.randomUUID();
       const now = new Date().toISOString();
+
+      const descLength = input.description.trim().length;
+      let initialScore = 1;
+      if (descLength >= 100) initialScore += 3;
+      if (input.photo_url) initialScore += 2;
 
       const initialSignals: VerificationSignal[] = [
         {
-          id: `vs${Date.now()}-sub`,
+          id: crypto.randomUUID(),
           report_id: newId,
           label: '+1 report submitted',
           points: 1,
         },
       ];
 
-      if (input.description.trim().length >= 100) {
+      if (descLength >= 100) {
         initialSignals.push({
-          id: `vs${Date.now()}-desc`,
+          id: crypto.randomUUID(),
           report_id: newId,
           label: '+3 detailed description (over 100 characters)',
           points: 3,
@@ -512,14 +543,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
       if (input.photo_url) {
         initialSignals.push({
-          id: `vs${Date.now()}-photo`,
+          id: crypto.randomUUID(),
           report_id: newId,
           label: '+2 photo attached',
           points: 2,
         });
       }
-
-      const initialScore = initialSignals.reduce((sum, s) => sum + s.points, 0);
 
       const newReport: Report = {
         id: newId,
@@ -527,17 +556,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         student_name: currentUser.name,
         location_id: input.location_id,
         location_name: input.location_name,
+        hall: input.hall,
         category: input.category,
-        description: input.description,
-        photo_url: input.photo_url,
+        description: input.description.trim(),
+        photo_url: input.photo_url || null,
         status: 'open',
-        verification_score: Math.min(MAX_VERIFICATION_SCORE, Math.max(1, initialScore)),
+        priority: input.priority || 'medium',
+        verification_score: Math.min(MAX_VERIFICATION_SCORE, initialScore),
         is_archived: false,
         created_at: now,
       };
 
       const newEvent: StatusEvent = {
-        id: `se${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: newId,
         status: 'open',
         note: `Report submitted by ${currentUser.name}`,
@@ -551,15 +582,44 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setStatusEvents((prev) => [newEvent, ...prev]);
       setVerificationSignals((prev) => [...initialSignals, ...prev]);
 
-      (async () => {
-        try {
-          await supabase.from('reports').insert(newReport);
-          await supabase.from('status_events').insert(newEvent);
-          await supabase.from('verification_signals').insert(initialSignals);
-        } catch (err) {
-          console.warn('Supabase persist notice for addReport:', err);
+      try {
+        const { error: repErr } = await supabase.from('reports').insert({
+          id: newReport.id,
+          student_id: newReport.student_id,
+          student_name: newReport.student_name,
+          location_id: newReport.location_id,
+          location_name: newReport.location_name,
+          hall: newReport.hall || null,
+          category: newReport.category,
+          description: newReport.description,
+          photo_url: newReport.photo_url,
+          status: 'open',
+          priority: newReport.priority,
+        });
+        if (repErr) {
+          console.error('Supabase error inserting report:', repErr);
+          // Roll back optimistic updates
+          setReports((prev) => prev.filter((r) => r.id !== newReport.id));
+          setStatusEvents((prev) => prev.filter((e) => e.id !== newEvent.id));
+          setVerificationSignals((prev) => prev.filter((s) => s.report_id !== newReport.id));
+          toast.error('Failed to save report to server', { description: repErr.message });
+          throw new Error(repErr.message);
         }
-      })();
+
+        const { error: eventErr } = await supabase.from('status_events').insert(newEvent);
+        if (eventErr) {
+          console.error('Supabase error inserting status event:', eventErr);
+          toast.warning('Report saved, but audit event logging failed', { description: eventErr.message });
+        }
+      } catch (err: any) {
+        console.error('Error in addReport persist:', err);
+        // Roll back optimistic updates
+        setReports((prev) => prev.filter((r) => r.id !== newReport.id));
+        setStatusEvents((prev) => prev.filter((e) => e.id !== newEvent.id));
+        setVerificationSignals((prev) => prev.filter((s) => s.report_id !== newReport.id));
+        toast.error('Network Error', { description: err.message || 'Could not save report' });
+        throw err;
+      }
 
       return newReport;
     },
@@ -567,15 +627,28 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const corroborateReport = useCallback(
-    (reportId: string) => {
+    async (reportId: string) => {
       const report = reports.find((r) => r.id === reportId);
       if (!report) return;
-      if (report.student_id === currentUser.id) return;
-      if (hasCorroborated(reportId)) return;
+      if (report.status === 'resolved' || report.is_archived) {
+        toast.error('Action Not Permitted', {
+          description: 'Cannot corroborate a resolved or archived report.',
+        });
+        return;
+      }
+      if (report.student_id === currentUser.id) {
+        toast.error('Action Not Permitted', { description: 'You cannot corroborate your own report.' });
+        return;
+      }
+      if (hasCorroborated(reportId)) {
+        toast.info('Already Corroborated', { description: 'You have already corroborated this report.' });
+        return;
+      }
 
+      const newId = crypto.randomUUID();
       const now = new Date().toISOString();
       const newCorroboration: Corroboration = {
-        id: `c${Date.now()}`,
+        id: newId,
         report_id: reportId,
         student_id: currentUser.id,
         student_name: currentUser.name,
@@ -583,50 +656,43 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       };
 
       const newScore = Math.min(MAX_VERIFICATION_SCORE, report.verification_score + 2);
-      const newSignal: VerificationSignal = {
-        id: `vs${Date.now()}`,
-        report_id: reportId,
-        label: `+2 corroborated by ${currentUser.name}`,
-        points: 2,
-      };
 
-      const newNotification: Notification = {
-        id: `n${Date.now()}`,
-        user_id: report.student_id,
-        type: 'corroboration',
-        report_id: reportId,
-        report_description: `${report.location_name}: ${report.description.slice(0, 50)}...`,
-        message: `${currentUser.name} corroborated your report`,
-        created_at: now,
-        read: false,
-      };
-
+      // Optimistic update
       setCorroborations((prev) => [...prev, newCorroboration]);
       setReports((prev) =>
         prev.map((r) => (r.id === reportId ? { ...r, verification_score: newScore } : r))
       );
-      setVerificationSignals((prev) => [...prev, newSignal]);
-      setNotifications((prev) => [newNotification, ...prev]);
 
-      (async () => {
-        try {
-          await supabase.from('corroborations').insert(newCorroboration);
-          await supabase.from('reports').update({ verification_score: newScore }).eq('id', reportId);
-          await supabase.from('verification_signals').insert(newSignal);
-          await supabase.from('notifications').insert(newNotification);
-        } catch (err) {
-          console.warn('Supabase persist notice for corroborateReport:', err);
+      try {
+        const { error } = await supabase.from('corroborations').insert({
+          id: newCorroboration.id,
+          report_id: newCorroboration.report_id,
+          student_id: newCorroboration.student_id,
+          student_name: newCorroboration.student_name,
+        });
+
+        if (error) {
+          toast.error('Corroboration Failed', { description: error.message });
+          setCorroborations((prev) => prev.filter((c) => c.id !== newId));
+          setReports((prev) =>
+            prev.map((r) => (r.id === reportId ? { ...r, verification_score: report.verification_score } : r))
+          );
+        } else {
+          toast.success('Report Corroborated', { description: '+2 verification score added.' });
         }
-      })();
+      } catch (err: any) {
+        console.warn('Supabase persist error for corroborateReport:', err);
+        toast.error('Network Error', { description: err.message || 'Could not corroborate' });
+      }
     },
     [currentUser, hasCorroborated, reports]
   );
 
   const updateReportStatus = useCallback(
-    (reportId: string, newStatus: ReportStatus, note: string) => {
+    async (reportId: string, newStatus: ReportStatus, note: string) => {
       const now = new Date().toISOString();
       const newEvent: StatusEvent = {
-        id: `se${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         status: newStatus,
         note,
@@ -645,7 +711,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       let newNotification: Notification | null = null;
       if (report) {
         newNotification = {
-          id: `n${Date.now()}`,
+          id: crypto.randomUUID(),
           user_id: report.student_id,
           type: 'status_change',
           report_id: reportId,
@@ -657,31 +723,118 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         setNotifications((prev) => [newNotification!, ...prev]);
       }
 
-      (async () => {
-        try {
-          await supabase.from('reports').update({ status: newStatus }).eq('id', reportId);
-          await supabase.from('status_events').insert(newEvent);
-          if (newNotification && report) {
-            await supabase.from('notifications').insert(newNotification);
-          }
-        } catch (err) {
-          console.warn('Supabase persist notice for updateReportStatus:', err);
+      try {
+        const { error: repErr } = await supabase
+          .from('reports')
+          .update({ status: newStatus })
+          .eq('id', reportId);
+        if (repErr) {
+          toast.error('Failed to update status', { description: repErr.message });
+          return;
         }
-      })();
+
+        await supabase.from('status_events').insert(newEvent);
+        toast.success('Report Status Updated', { description: `Status changed to ${newStatus.replace('_', ' ')}.` });
+      } catch (err: any) {
+        console.warn('Supabase persist notice for updateReportStatus:', err);
+        toast.error('Network Error', { description: err.message });
+      }
+    },
+    [currentUser, reports]
+  );
+
+  const updateReportPriority = useCallback(
+    async (reportId: string, priority: ReportPriority) => {
+      setReports((prev) =>
+        prev.map((r) => (r.id === reportId ? { ...r, priority } : r))
+      );
+
+      const now = new Date().toISOString();
+      const auditEvent: StatusEvent = {
+        id: crypto.randomUUID(),
+        report_id: reportId,
+        status: reports.find((r) => r.id === reportId)?.status || 'open',
+        note: `Work order priority adjusted to ${priority.toUpperCase()} by ${currentUser.name}`,
+        actor_role: currentUser.role,
+        actor_name: currentUser.name,
+        actor_id: currentUser.id,
+        created_at: now,
+      };
+      setStatusEvents((prev) => [auditEvent, ...prev]);
+
+      try {
+        const { error } = await supabase
+          .from('reports')
+          .update({ priority })
+          .eq('id', reportId);
+        if (error) {
+          toast.error('Failed to update priority', { description: error.message });
+        } else {
+          await supabase.from('status_events').insert(auditEvent);
+          toast.success('Priority Updated', { description: `Report priority set to ${priority}.` });
+        }
+      } catch (err: any) {
+        console.warn('Supabase persist error for updateReportPriority:', err);
+        toast.error('Network Error', { description: err.message || 'Could not reach server' });
+      }
+    },
+    [currentUser, reports]
+  );
+
+  const assignReportTechnician = useCallback(
+    async (reportId: string, technicianName: string | null) => {
+      setReports((prev) =>
+        prev.map((r) => (r.id === reportId ? { ...r, assigned_to: technicianName } : r))
+      );
+
+      const now = new Date().toISOString();
+      const noteText = technicianName
+        ? `Assigned technician: ${technicianName} by ${currentUser.name}`
+        : `Technician unassigned by ${currentUser.name}`;
+
+      const auditEvent: StatusEvent = {
+        id: crypto.randomUUID(),
+        report_id: reportId,
+        status: reports.find((r) => r.id === reportId)?.status || 'open',
+        note: noteText,
+        actor_role: currentUser.role,
+        actor_name: currentUser.name,
+        actor_id: currentUser.id,
+        created_at: now,
+      };
+      setStatusEvents((prev) => [auditEvent, ...prev]);
+
+      try {
+        const { error } = await supabase
+          .from('reports')
+          .update({ assigned_to: technicianName })
+          .eq('id', reportId);
+        if (error) {
+          toast.error('Failed to assign technician', { description: error.message });
+        } else {
+          await supabase.from('status_events').insert(auditEvent);
+          toast.success('Technician Assigned', { description: noteText });
+        }
+      } catch (err: any) {
+        console.warn('Supabase persist error for assignReportTechnician:', err);
+        toast.error('Network Error', { description: err.message || 'Could not reach server' });
+      }
     },
     [currentUser, reports]
   );
 
   const addComment = useCallback(
-    (reportId: string, text: string) => {
+    async (reportId: string, text: string) => {
+      const trimmedText = text.trim();
+      if (!trimmedText) return;
       const now = new Date().toISOString();
       const newComment: Comment = {
-        id: `cm${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         author_id: currentUser.id,
         author_name: currentUser.name,
         author_role: currentUser.role,
-        text,
+        text: trimmedText,
         created_at: now,
       };
 
@@ -691,51 +844,62 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       let commentNotification: Notification | null = null;
       if (report && currentUser.id !== report.student_id) {
         commentNotification = {
-          id: `n${Date.now()}`,
+          id: crypto.randomUUID(),
           user_id: report.student_id,
           type: 'comment',
           report_id: reportId,
           report_description: `${report.location_name}: ${report.description.slice(0, 50)}...`,
-          message: `${currentUser.name} (${roleLabel(currentUser.role)}) commented: "${text.slice(0, 50)}${text.length > 50 ? '...' : ''}"`,
+          message: `${currentUser.name} (${roleLabel(currentUser.role)}) commented: "${trimmedText.slice(0, 50)}${trimmedText.length > 50 ? '...' : ''}"`,
           created_at: now,
           read: false,
         };
         setNotifications((prev) => [commentNotification!, ...prev]);
       }
 
-      (async () => {
-        try {
-          await supabase.from('comments').insert(newComment);
-          if (commentNotification) {
-            await supabase.from('notifications').insert(commentNotification);
-          }
-        } catch (err) {
-          console.warn('Supabase persist notice for addComment:', err);
+      try {
+        const { error } = await supabase.from('comments').insert({
+          id: newComment.id,
+          report_id: newComment.report_id,
+          author_id: newComment.author_id,
+          author_name: newComment.author_name,
+          author_role: newComment.author_role,
+          text: newComment.text,
+        });
+        if (error) {
+          toast.error('Failed to Post Comment', { description: error.message });
+          setComments((prev) => prev.filter((c) => c.id !== newComment.id));
+        } else {
+          toast.success('Comment Posted');
         }
-      })();
+      } catch (err: any) {
+        console.warn('Supabase persist notice for addComment:', err);
+        toast.error('Network Error', { description: err.message });
+      }
     },
     [currentUser, reports]
   );
 
   const addInternalNote = useCallback(
-    (reportId: string, noteText: string) => {
+    async (reportId: string, noteText: string) => {
+      const trimmed = noteText.trim();
+      if (!trimmed) return;
       const now = new Date().toISOString();
       const newNote: InternalNote = {
-        id: `in${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         author_id: currentUser.id,
         author_name: currentUser.name,
-        author_role: currentUser.role,
-        text: noteText,
+        author_role: currentUser.role as 'staff' | 'admin',
+        text: trimmed,
         created_at: now,
       };
 
       const report = reports.find((r) => r.id === reportId);
       const newEvent: StatusEvent = {
-        id: `se${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         status: report?.status ?? 'open',
-        note: `Internal note logged: "${noteText.slice(0, 45)}${noteText.length > 45 ? '...' : ''}"`,
+        note: `Internal note logged: "${trimmed.slice(0, 45)}${trimmed.length > 45 ? '...' : ''}"`,
         actor_role: currentUser.role,
         actor_name: currentUser.name,
         actor_id: currentUser.id,
@@ -745,47 +909,67 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setInternalNotes((prev) => [newNote, ...prev]);
       setStatusEvents((prev) => [newEvent, ...prev]);
 
-      (async () => {
-        try {
-          await supabase.from('internal_notes').insert(newNote);
+      try {
+        const { error } = await supabase.from('internal_notes').insert({
+          id: newNote.id,
+          report_id: newNote.report_id,
+          author_id: newNote.author_id,
+          author_name: newNote.author_name,
+          author_role: newNote.author_role,
+          text: newNote.text,
+        });
+        if (error) {
+          toast.error('Failed to Save Internal Note', { description: error.message });
+        } else {
           await supabase.from('status_events').insert(newEvent);
-        } catch (err) {
-          console.warn('Supabase persist notice for addInternalNote:', err);
+          toast.success('Internal Note Saved');
         }
-      })();
+      } catch (err: any) {
+        console.warn('Supabase persist notice for addInternalNote:', err);
+        toast.error('Network Error', { description: err.message });
+      }
     },
     [currentUser, reports]
   );
 
   const updateInternalNote = useCallback(
-    (noteId: string, newText: string) => {
+    async (noteId: string, newText: string) => {
       const now = new Date().toISOString();
 
       setInternalNotes((prev) =>
         prev.map((n) => (n.id === noteId ? { ...n, text: newText, updated_at: now } : n))
       );
 
-      (async () => {
-        try {
-          await supabase.from('internal_notes').update({ text: newText, updated_at: now }).eq('id', noteId);
-        } catch (err) {
-          console.warn('Supabase persist notice for updateInternalNote:', err);
+      try {
+        const { error } = await supabase
+          .from('internal_notes')
+          .update({ text: newText, updated_at: now })
+          .eq('id', noteId);
+        if (error) {
+          toast.error('Failed to update note', { description: error.message });
+        } else {
+          toast.success('Internal Note Updated');
         }
-      })();
+      } catch (err: any) {
+        console.warn('Supabase persist notice for updateInternalNote:', err);
+      }
     },
     []
   );
 
-  const deleteInternalNote = useCallback((noteId: string) => {
+  const deleteInternalNote = useCallback(async (noteId: string) => {
     setInternalNotes((prev) => prev.filter((n) => n.id !== noteId));
 
-    (async () => {
-      try {
-        await supabase.from('internal_notes').delete().eq('id', noteId);
-      } catch (err) {
-        console.warn('Supabase persist notice for deleteInternalNote:', err);
+    try {
+      const { error } = await supabase.from('internal_notes').delete().eq('id', noteId);
+      if (error) {
+        toast.error('Failed to delete note', { description: error.message });
+      } else {
+        toast.success('Internal Note Deleted');
       }
-    })();
+    } catch (err: any) {
+      console.warn('Supabase persist notice for deleteInternalNote:', err);
+    }
   }, []);
 
   const getInternalNotesByReport = useCallback(
@@ -797,127 +981,72 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const confirmReport = useCallback(
-    (reportId: string) => {
-      if (hasRepConfirmed(reportId) || hasRepDisputed(reportId)) return;
-      const now = new Date().toISOString();
-      const report = reports.find((r) => r.id === reportId);
-      const currentStatus = report?.status ?? 'open';
-      const newScore = Math.min(MAX_VERIFICATION_SCORE, (report?.verification_score ?? 0) + 10);
-
-      const newSignal: VerificationSignal = {
-        id: `vs${Date.now()}`,
-        report_id: reportId,
-        label: 'Verified by Rep',
-        points: 10,
-      };
-
-      const auditEvent: StatusEvent = {
-        id: `se${Date.now()}`,
-        report_id: reportId,
-        status: currentStatus,
-        note: `Verified and confirmed on-site by Hall Rep ${currentUser.name}`,
-        actor_role: 'rep',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-
-      let newNotification: Notification | null = null;
-      if (report && currentUser.id !== report.student_id) {
-        newNotification = {
-          id: `n${Date.now()}`,
-          user_id: report.student_id,
-          type: 'rep_action',
-          report_id: reportId,
-          report_description: `${report.location_name}: ${report.description.slice(0, 50)}...`,
-          message: `Hall Rep ${currentUser.name} verified and confirmed your report`,
-          created_at: now,
-          read: false,
-        };
+    async (reportId: string) => {
+      if (hasRepConfirmed(reportId) || hasRepDisputed(reportId)) {
+        toast.info('Action Already Taken', { description: 'You have already verified or disputed this report.' });
+        return;
       }
 
-      setReports((prev) =>
-        prev.map((r) => (r.id === reportId ? { ...r, verification_score: newScore } : r))
-      );
-      setVerificationSignals((prev) => [...prev, newSignal]);
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-      if (newNotification) {
-        setNotifications((prev) => [newNotification!, ...prev]);
-      }
+      try {
+        const { data, error } = await supabase.rpc('rep_confirm_report', {
+          p_report_id: reportId,
+        });
 
-      (async () => {
-        try {
-          await supabase.from('reports').update({ verification_score: newScore }).eq('id', reportId);
-          await supabase.from('verification_signals').insert(newSignal);
-          await supabase.from('status_events').insert(auditEvent);
-          if (newNotification) {
-            await supabase.from('notifications').insert(newNotification);
+        if (error) {
+          toast.error('Verification Failed', { description: error.message });
+        } else {
+          toast.success('Report Verified by Rep', { description: '+10 priority verification score added.' });
+          if (data && typeof data.new_score === 'number') {
+            setReports((prev) =>
+              prev.map((r) => (r.id === reportId ? { ...r, verification_score: data.new_score } : r))
+            );
           }
-        } catch (err) {
-          console.warn('Supabase persist notice for confirmReport:', err);
         }
-      })();
+      } catch (err: any) {
+        console.warn('RPC rep_confirm_report notice:', err);
+        toast.error('Network Error', { description: err.message || 'Could not confirm report' });
+      }
     },
-    [currentUser, hasRepConfirmed, hasRepDisputed, reports]
+    [hasRepConfirmed, hasRepDisputed]
   );
 
   const disputeReport = useCallback(
-    (reportId: string, reason: string) => {
-      if (hasRepConfirmed(reportId) || hasRepDisputed(reportId)) return;
-      const now = new Date().toISOString();
-      const report = reports.find((r) => r.id === reportId);
-      const currentStatus = report?.status ?? 'open';
-      const newScore = Math.max(0, (report?.verification_score ?? 0) - 5);
-
-      const auditEvent: StatusEvent = {
-        id: `se${Date.now()}`,
-        report_id: reportId,
-        status: currentStatus,
-        note: `Disputed by Hall Rep ${currentUser.name}: ${reason}`,
-        actor_role: 'rep',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-
-      let newNotification: Notification | null = null;
-      if (report && currentUser.id !== report.student_id) {
-        newNotification = {
-          id: `n${Date.now()}`,
-          user_id: report.student_id,
-          type: 'rep_action',
-          report_id: reportId,
-          report_description: `${report.location_name}: ${report.description.slice(0, 50)}...`,
-          message: `Hall Rep ${currentUser.name} disputed your report: ${reason}`,
-          created_at: now,
-          read: false,
-        };
+    async (reportId: string, reason: string) => {
+      if (hasRepConfirmed(reportId) || hasRepDisputed(reportId)) {
+        toast.info('Action Already Taken', { description: 'You have already verified or disputed this report.' });
+        return;
       }
 
-      setReports((prev) =>
-        prev.map((r) => (r.id === reportId ? { ...r, verification_score: newScore } : r))
-      );
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-      if (newNotification) {
-        setNotifications((prev) => [newNotification!, ...prev]);
+      if (reason.trim().length < 5) {
+        toast.error('Reason Required', { description: 'Please provide at least 5 characters explaining the dispute.' });
+        return;
       }
 
-      (async () => {
-        try {
-          await supabase.from('reports').update({ verification_score: newScore }).eq('id', reportId);
-          await supabase.from('status_events').insert(auditEvent);
-          if (newNotification) {
-            await supabase.from('notifications').insert(newNotification);
+      try {
+        const { data, error } = await supabase.rpc('rep_dispute_report', {
+          p_report_id: reportId,
+          p_reason: reason.trim(),
+        });
+
+        if (error) {
+          toast.error('Dispute Failed', { description: error.message });
+        } else {
+          toast.success('Report Disputed', { description: '-5 points applied.' });
+          if (data && typeof data.new_score === 'number') {
+            setReports((prev) =>
+              prev.map((r) => (r.id === reportId ? { ...r, verification_score: data.new_score } : r))
+            );
           }
-        } catch (err) {
-          console.warn('Supabase persist notice for disputeReport:', err);
         }
-      })();
+      } catch (err: any) {
+        console.warn('RPC rep_dispute_report notice:', err);
+        toast.error('Network Error', { description: err.message || 'Could not dispute report' });
+      }
     },
-    [currentUser, hasRepConfirmed, hasRepDisputed, reports]
+    [hasRepConfirmed, hasRepDisputed]
   );
 
-  const markNotificationsRead = useCallback(() => {
+  const markNotificationsRead = useCallback(async () => {
     setNotifications((prev) =>
       prev.map((n) =>
         !n.user_id || n.user_id === currentUser.id ? { ...n, read: true } : n
@@ -925,134 +1054,97 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     );
 
     if (currentUser.id && currentUser.id !== 'guest') {
-      (async () => {
-        try {
-          await supabase
-            .from('notifications')
-            .update({ read: true })
-            .eq('user_id', currentUser.id)
-            .eq('read', false);
-        } catch (err) {
-          console.warn('Supabase persist notice for markNotificationsRead:', err);
-        }
-      })();
+      try {
+        await supabase
+          .from('notifications')
+          .update({ read: true })
+          .eq('user_id', currentUser.id)
+          .eq('read', false);
+      } catch (err) {
+        console.warn('Supabase persist notice for markNotificationsRead:', err);
+      }
     }
   }, [currentUser.id]);
 
   const markNotificationAsRead = useCallback(
-    (id: string) => {
+    async (id: string) => {
       setNotifications((prev) =>
         prev.map((n) => (n.id === id ? { ...n, read: true } : n))
       );
 
       if (currentUser.id && currentUser.id !== 'guest') {
-        (async () => {
-          try {
-            await supabase
-              .from('notifications')
-              .update({ read: true })
-              .eq('id', id);
-          } catch (err) {
-            console.warn('Supabase persist notice for markNotificationAsRead:', err);
-          }
-        })();
+        try {
+          await supabase
+            .from('notifications')
+            .update({ read: true })
+            .eq('id', id);
+        } catch (err) {
+          console.warn('Supabase persist notice for markNotificationAsRead:', err);
+        }
       }
     },
     [currentUser.id]
   );
 
   const updateUserRole = useCallback(
-    (userId: string, role: Role) => {
-      const prevUser = users.find((u) => u.id === userId);
-      setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
-      setCurrentUser((prev) => (prev.id === userId ? { ...prev, role } : prev));
+    async (userId: string, role: Role) => {
+      try {
+        const { error } = await supabase.rpc('admin_update_user_role', {
+          p_user_id: userId,
+          p_role: role,
+        });
 
-      // If user was previously a rep and is demoted/changed, sync hall_rep_requests
-      if (prevUser?.role === 'rep' && role !== 'rep') {
-        const now = new Date().toISOString();
-        const reason = 'Role changed by Administrator in User Directory.';
-        setHallRepRequests((prev) =>
-          prev.map((r) =>
-            (r.user_id === userId || r.student_id === userId) && r.status === 'approved'
-              ? {
-                  ...r,
-                  status: 'stepped_down' as HallRepRequestStatus,
-                  rejection_reason: reason,
-                  reviewed_at: now,
-                  reviewed_by: currentUser.name || 'Administration',
-                }
-              : r
-          )
-        );
-
-        (async () => {
-          try {
-            const { error: repSyncErr } = await supabase
-              .from('hall_rep_requests')
-              .update({
-                status: 'stepped_down',
-                rejection_reason: reason,
-                reviewed_at: now,
-                reviewed_by: currentUser.name || 'Administration',
-              })
-              .eq('user_id', userId)
-              .eq('status', 'approved');
-
-            if (repSyncErr) {
-              await supabase
-                .from('hall_rep_requests')
-                .update({
-                  status: 'rejected',
-                  rejection_reason: reason,
-                  reviewed_at: now,
-                  reviewed_by: currentUser.name || 'Administration',
-                })
-                .eq('user_id', userId)
-                .eq('status', 'approved');
-            }
-          } catch (err) {
-            console.warn('Supabase sync notice for rep request on role change:', err);
-          }
-        })();
-      }
-
-      (async () => {
-        try {
-          await supabase.from('profiles').update({ role }).eq('id', userId);
-        } catch (err) {
-          console.warn('Supabase persist notice for updateUserRole:', err);
+        if (error) {
+          toast.error('Failed to Update Role', { description: error.message });
+        } else {
+          toast.success('User Role Updated', { description: `Role successfully changed to ${role}.` });
+          setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
+          setCurrentUser((prev) => (prev.id === userId ? { ...prev, role } : prev));
         }
-      })();
+      } catch (err: any) {
+        console.warn('RPC admin_update_user_role error:', err);
+        toast.error('Network Error', { description: err.message });
+      }
     },
-    [currentUser.name, users]
+    []
   );
 
   const addLocation = useCallback(
-    (name: string, buildingType: BuildingType) => {
+    async (name: string, buildingType: BuildingType, hall?: string) => {
       const newLocation: Location = {
-        id: `l${Date.now()}`,
-        name,
+        id: crypto.randomUUID(),
+        name: name.trim(),
         building_type: buildingType,
+        hall: hall?.trim() || undefined,
       };
       setLocations((prev) => [...prev, newLocation]);
 
-      (async () => {
-        try {
-          await supabase.from('locations').insert(newLocation);
-        } catch (err) {
-          console.warn('Supabase persist notice for addLocation:', err);
+      try {
+        const { error } = await supabase.from('locations').insert({
+          id: newLocation.id,
+          name: newLocation.name,
+          building_type: newLocation.building_type,
+          hall: newLocation.hall || null,
+        });
+        if (error) {
+          toast.error('Failed to add location', { description: error.message });
+        } else {
+          toast.success('Location Added', { description: `${newLocation.name} saved.` });
         }
-      })();
+      } catch (err: any) {
+        console.warn('Supabase persist notice for addLocation:', err);
+      }
     },
     []
   );
 
   const updateLocation = useCallback(
-    async (id: string, name: string, buildingType: BuildingType) => {
+    async (id: string, name: string, buildingType: BuildingType, hall?: string) => {
       const trimmedName = name.trim();
+      const trimmedHall = hall?.trim();
       setLocations((prev) =>
         prev.map((l) =>
-          l.id === id ? { ...l, name: trimmedName, building_type: buildingType } : l
+          l.id === id ? { ...l, name: trimmedName, building_type: buildingType, hall: trimmedHall } : l
         )
       );
       setReports((prev) =>
@@ -1064,14 +1156,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       try {
         await supabase
           .from('locations')
-          .update({ name: trimmedName, building_type: buildingType })
+          .update({ name: trimmedName, building_type: buildingType, hall: trimmedHall || null })
           .eq('id', id);
         await supabase
           .from('reports')
           .update({ location_name: trimmedName })
           .eq('location_id', id);
-      } catch (err) {
+        toast.success('Location Updated');
+      } catch (err: any) {
         console.warn('Supabase persist notice for updateLocation:', err);
+        toast.error('Failed to update location', { description: err.message });
       }
     },
     []
@@ -1082,9 +1176,134 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setLocations((prev) => prev.filter((l) => l.id !== id));
 
       try {
-        await supabase.from('locations').delete().eq('id', id);
-      } catch (err) {
+        const { error } = await supabase.from('locations').delete().eq('id', id);
+        if (error) {
+          toast.error('Failed to delete location', { description: error.message });
+        } else {
+          toast.success('Location Deleted');
+        }
+      } catch (err: any) {
         console.warn('Supabase persist notice for deleteLocation:', err);
+      }
+    },
+    []
+  );
+
+  const addCampusUnit = useCallback(
+    async (name: string, category: CampusUnitCategory): Promise<CampusUnit> => {
+      const trimmedName = name.trim();
+      const newUnit: CampusUnit = {
+        id: crypto.randomUUID(),
+        name: trimmedName,
+        category,
+        created_at: new Date().toISOString(),
+      };
+
+      setCampusUnits((prev) =>
+        [...prev, newUnit].sort((a, b) => a.name.localeCompare(b.name))
+      );
+
+      try {
+        const { error } = await supabase.from('campus_units').insert({
+          id: newUnit.id,
+          name: newUnit.name,
+          category: newUnit.category,
+        });
+
+        if (error) {
+          setCampusUnits((prev) => prev.filter((u) => u.id !== newUnit.id));
+          toast.error('Failed to add campus unit', { description: error.message });
+          throw new Error(error.message);
+        } else {
+          // Keep locations table in sync
+          const bType = newUnit.category === 'hall' ? 'residence' : newUnit.category === 'department' ? 'academic' : 'administrative';
+          await supabase.from('locations').upsert({
+            id: newUnit.id,
+            name: newUnit.name,
+            hall: newUnit.name,
+            building_type: bType,
+          });
+          setLocations((prev) => [
+            ...prev,
+            { id: newUnit.id, name: newUnit.name, hall: newUnit.name, building_type: bType, created_at: new Date().toISOString() },
+          ]);
+          toast.success('Campus Unit Added', {
+            description: `${trimmedName} added to ${category} registry.`,
+          });
+        }
+      } catch (err: any) {
+        console.warn('Supabase persist notice for addCampusUnit:', err);
+        throw err;
+      }
+
+      return newUnit;
+    },
+    []
+  );
+
+  const updateCampusUnit = useCallback(
+    async (id: string, name: string, category: CampusUnitCategory) => {
+      const trimmedName = name.trim();
+      let prevUnits: CampusUnit[] = [];
+      setCampusUnits((prev) => {
+        prevUnits = prev;
+        return prev
+          .map((u) => (u.id === id ? { ...u, name: trimmedName, category } : u))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      });
+
+      try {
+        const { error } = await supabase
+          .from('campus_units')
+          .update({ name: trimmedName, category })
+          .eq('id', id);
+
+        if (error) {
+          if (prevUnits.length > 0) setCampusUnits(prevUnits);
+          toast.error('Failed to update campus unit', { description: error.message });
+          throw new Error(error.message);
+        } else {
+          const bType = category === 'hall' ? 'residence' : category === 'department' ? 'academic' : 'administrative';
+          await supabase.from('locations').update({ name: trimmedName, hall: trimmedName, building_type: bType }).eq('id', id);
+          setLocations((prev) =>
+            prev.map((l) => (l.id === id ? { ...l, name: trimmedName, hall: trimmedName, building_type: bType } : l))
+          );
+          toast.success('Campus Unit Updated');
+        }
+      } catch (err: any) {
+        console.warn('Supabase persist notice for updateCampusUnit:', err);
+        throw err;
+      }
+    },
+    []
+  );
+
+  const deleteCampusUnit = useCallback(
+    async (id: string) => {
+      let target: CampusUnit | undefined;
+      let prevUnits: CampusUnit[] = [];
+      setCampusUnits((prev) => {
+        prevUnits = prev;
+        target = prev.find((u) => u.id === id);
+        return prev.filter((u) => u.id !== id);
+      });
+
+      try {
+        const { error } = await supabase.from('campus_units').delete().eq('id', id);
+        if (error) {
+          if (prevUnits.length > 0) setCampusUnits(prevUnits);
+          toast.error('Failed to delete campus unit', { description: error.message });
+          throw new Error(error.message);
+        } else {
+          await supabase.from('locations').delete().eq('id', id);
+          setLocations((prev) => prev.filter((l) => l.id !== id));
+          toast.success('Campus Unit Removed', {
+            description: target ? `${target.name} removed from registry.` : 'Removed.',
+          });
+        }
+      } catch (err: any) {
+        console.warn('Supabase persist notice for deleteCampusUnit:', err);
+        throw err;
       }
     },
     []
@@ -1103,63 +1322,82 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
       // --- 1. REGISTRATION (SIGN UP) ---
       if (isSignUp) {
-        let assignedRole: Role = role || 'student';
-        if (normalized.includes('staff.')) assignedRole = 'staff';
-        if (normalized.includes('admin.')) assignedRole = 'admin';
-
+        // P0 Security Item 3: Public registrations are ALWAYS student.
+        // No role inference from email text.
         const displayName = name?.trim() || normalized.split('@')[0];
         const assignedHall = hall?.trim() || 'Campus General';
 
-        // Check if an account with this email already exists in public.profiles
-        const { data: existingProfile } = await supabase
-          .from('profiles')
-          .select('id, email')
-          .ilike('email', normalized)
-          .maybeSingle();
-
-        if (existingProfile) {
-          throw new Error(
-            'An account with this email already exists. Please switch to "Sign In".'
-          );
-        }
-
-        const newUser: User = {
-          id: `u-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          name: displayName,
+        const { data: authData, error: signUpError } = await supabase.auth.signUp({
           email: normalized,
-          hall_or_dept: assignedHall,
-          role: assignedRole,
-          tempPasskey: password,
-          is_banned: false,
-        };
+          password,
+          options: {
+            data: {
+              name: displayName,
+              hall_or_dept: assignedHall,
+              role: 'student',
+            },
+          },
+        });
 
-        const { error: insertError } = await safeInsertProfile(newUser);
+        if (signUpError) {
+          throw new Error(signUpError.message || 'Failed to register account.');
+        }
 
-        if (insertError) {
-          if (insertError.message.includes('unique') || insertError.message.includes('duplicate')) {
-            throw new Error('An account with this email already exists. Please switch to "Sign In".');
+        if (!authData.user) {
+          throw new Error('Sign-up failed. No user was returned by authentication service.');
+        }
+
+        let activeUser: User | null = null;
+        if (!authData.session) {
+          const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({
+            email: normalized,
+            password,
+          });
+          if (!signInErr && signInData.user) {
+            const { data: profile } = await supabase
+              .from('profiles')
+              .select('*')
+              .eq('id', signInData.user.id)
+              .maybeSingle();
+            if (profile) activeUser = dbProfileToUser(profile);
           }
-          throw new Error(insertError.message || 'Failed to register account.');
         }
 
-        setUsers((prev) => [
-          newUser,
-          ...prev.filter((u) => u.id !== newUser.id && u.email.toLowerCase() !== normalized),
-        ]);
-        setCurrentUser(newUser);
-
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('campusfix_user_id', newUser.id);
+        if (!activeUser) {
+          activeUser = {
+            id: authData.user.id,
+            name: displayName,
+            email: normalized,
+            hall_or_dept: assignedHall,
+            role: 'student',
+            is_banned: false,
+          };
         }
 
-        return newUser;
+        setCurrentUser(activeUser);
+        setUsers((prev) => [activeUser!, ...prev.filter((u) => u.id !== activeUser!.id)]);
+        toast.success('Account Created', { description: 'Welcome to CampusFix!' });
+        return activeUser;
       }
 
       // --- 2. AUTHENTICATION (SIGN IN) ---
+      const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: normalized,
+        password,
+      });
+
+      if (signInError) {
+        throw new Error(signInError.message || 'Invalid email or password. Please check your credentials.');
+      }
+
+      if (!authData.user) {
+        throw new Error('Authentication succeeded but user identity is missing.');
+      }
+
       const { data: dbProfile, error: queryError } = await supabase
         .from('profiles')
         .select('*')
-        .ilike('email', normalized)
+        .eq('id', authData.user.id)
         .maybeSingle();
 
       if (queryError) {
@@ -1167,168 +1405,107 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
 
       if (!dbProfile) {
-        throw new Error(
-          'Account not found. Please check your email or click "Create Account" to register.'
-        );
-      }
-
-      if (dbProfile.temp_passkey && dbProfile.temp_passkey !== password) {
-        throw new Error('Invalid email or password. Please check your credentials.');
+        throw new Error('User profile record not found in database.');
       }
 
       const user = dbProfileToUser(dbProfile);
 
       if (user.is_banned) {
+        await supabase.auth.signOut();
         throw new Error(
           `Account suspended: ${user.ban_reason || 'Access has been revoked by administration.'}`
         );
       }
 
-      // If temp_passkey was null (e.g. initial demo seed users), save the password
-      if (!dbProfile.temp_passkey) {
-        try {
-          await supabase
-            .from('profiles')
-            .update({ temp_passkey: password })
-            .eq('id', user.id);
-        } catch (e) {}
-      }
-
-      setUsers((prev) => [user, ...prev.filter((u) => u.id !== user.id)]);
       setCurrentUser(user);
-
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('campusfix_user_id', user.id);
-      }
-
-      (async () => {
-        try {
-          const [notifsRes, repRes] = await Promise.all([
-            supabase.from('notifications').select('*').order('created_at', { ascending: false }),
-            supabase.from('hall_rep_requests').select('*').order('created_at', { ascending: false }),
-          ]);
-          if (notifsRes.data) {
-            setNotifications(notifsRes.data as Notification[]);
-          }
-          if (repRes.data) {
-            setHallRepRequests(
-              (repRes.data as any[]).map((r) => {
-                const reason = (r.rejection_reason || r.admin_notes || '').toLowerCase();
-                const isConcluded =
-                  r.status === 'stepped_down' ||
-                  (r.status === 'rejected' &&
-                    (reason.includes('stepped down') ||
-                      reason.includes('revok') ||
-                      reason.includes('resigned') ||
-                      reason.includes('concluded')));
-                return {
-                  ...r,
-                  status: isConcluded ? 'stepped_down' : r.status,
-                  user_id: r.user_id || r.student_id || '',
-                  user_name: r.user_name || r.student_name || 'Candidate',
-                  user_email: r.user_email || r.student_email || '',
-                  hall: r.hall || r.hall_name || '',
-                  student_id: r.student_id || r.user_id || '',
-                  student_name: r.student_name || r.user_name || 'Candidate',
-                  student_email: r.student_email || r.user_email || '',
-                  hall_name: r.hall_name || r.hall || '',
-                  rejection_reason: r.rejection_reason || r.admin_notes,
-                  admin_notes: r.admin_notes || r.rejection_reason,
-                };
-              })
-            );
-          }
-        } catch (e) {
-          console.warn('Notice re-fetching on login:', e);
-        }
-      })();
-
+      setUsers((prev) => [user, ...prev.filter((u) => u.id !== user.id)]);
+      toast.success('Signed In', { description: `Welcome back, ${user.name}!` });
       return user;
     },
     []
   );
 
   const logout = useCallback(async () => {
-    setCurrentUser(DEFAULT_USER);
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('campusfix_user_id');
+    try {
+      await supabase.auth.signOut();
+    } catch (e) {
+      console.warn('Sign out notice:', e);
     }
+    setCurrentUser(DEFAULT_USER);
+    toast.info('Signed Out', { description: 'You have been signed out of your session.' });
   }, []);
 
   const onboardStaff = useCallback(
-    (
+    async (
       name: string,
       email: string,
       department: string,
-      tempPasskey: string
-    ): User => {
-      const now = new Date().toISOString();
+      password?: string
+    ): Promise<User> => {
+      const pw = password?.trim() || 'CampusStaff@2025!';
+      const { data, error } = await supabase.rpc('admin_create_staff_user', {
+        p_email: email.trim().toLowerCase(),
+        p_password: pw,
+        p_name: name.trim(),
+        p_dept: department.trim(),
+      });
+
+      if (error) {
+        toast.error('Failed to Onboard Staff', { description: error.message });
+        throw new Error(error.message);
+      }
+
+      toast.success('Staff Account Created', {
+        description: `Staff member ${name} (${department}) onboarded successfully.`,
+      });
+
       const newStaff: User = {
-        id: `u-staff-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: data?.id || crypto.randomUUID(),
         name: name.trim(),
         email: email.trim().toLowerCase(),
         hall_or_dept: department.trim(),
         role: 'staff',
         requiresPasswordChange: true,
-        tempPasskey: tempPasskey.trim(),
-        onboardedAt: now,
+        onboardedAt: new Date().toISOString(),
         is_banned: false,
       };
 
-      const auditEvent: StatusEvent = {
-        id: `se-onboard-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: `Admin onboarded facilities staff member ${name} (${department}) with temporary passkey`,
-        actor_role: 'admin',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-
       setUsers((prev) => [newStaff, ...prev]);
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-
-      (async () => {
-        try {
-          await safeUpsertProfile(newStaff);
-          await supabase.from('status_events').insert(auditEvent);
-        } catch (err) {
-          console.warn('Supabase persist notice for onboardStaff:', err);
-        }
-      })();
-
       return newStaff;
     },
-    [currentUser]
+    []
   );
 
   const changePassword = useCallback(
     async (newPassword: string) => {
-      const { error } = await supabase
-        .from('profiles')
-        .update({
-          temp_passkey: newPassword,
-          requires_password_change: false,
-        })
-        .eq('id', currentUser.id);
+      const { error: authErr } = await supabase.auth.updateUser({
+        password: newPassword,
+      });
 
-      if (error) {
-        throw new Error(error.message || 'Failed to update password.');
+      if (authErr) {
+        toast.error('Password Update Failed', { description: authErr.message });
+        throw new Error(authErr.message);
+      }
+
+      try {
+        await supabase
+          .from('profiles')
+          .update({ requires_password_change: false })
+          .eq('id', currentUser.id);
+      } catch (err) {
+        console.warn('Notice updating requires_password_change flag:', err);
       }
 
       setCurrentUser((prev) => ({
         ...prev,
         requiresPasswordChange: false,
-        tempPasskey: newPassword,
       }));
       setUsers((prev) =>
         prev.map((u) =>
-          u.id === currentUser.id
-            ? { ...u, requiresPasswordChange: false, tempPasskey: newPassword }
-            : u
+          u.id === currentUser.id ? { ...u, requiresPasswordChange: false } : u
         )
       );
+      toast.success('Password Changed', { description: 'Your password was updated securely.' });
     },
     [currentUser.id]
   );
@@ -1341,8 +1518,9 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const room = maybeStatement !== undefined ? statementOrRoom.trim() : undefined;
       const hallDisplay = room ? `${hall.trim()} (Room ${room})` : hall.trim();
 
+      const newRequestId = crypto.randomUUID();
       const newRequest: HallRepRequest = {
-        id: `hrq${Date.now()}`,
+        id: newRequestId,
         user_id: currentUser.id,
         user_name: currentUser.name,
         user_email: currentUser.email,
@@ -1360,7 +1538,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setHallRepRequests((prev) => [newRequest, ...prev]);
 
       const auditEvent: StatusEvent = {
-        id: `se-rep-req-${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: 'SYSTEM_AUDIT',
         status: 'open',
         note: `Student ${currentUser.name} applied for Hall Representative appointment (${hallDisplay})`,
@@ -1372,22 +1550,24 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setStatusEvents((prev) => [auditEvent, ...prev]);
 
       try {
-        const dbPayload = {
-          id: newRequest.id,
+        const { error } = await supabase.from('hall_rep_requests').insert({
+          id: newRequestId,
           user_id: currentUser.id,
           user_name: currentUser.name,
           user_email: currentUser.email,
           hall: hallDisplay,
           statement: statement,
           status: 'pending',
-          created_at: now,
-        };
-        const { error: insertError } = await supabase.from('hall_rep_requests').insert(dbPayload);
-        if (insertError) {
-          console.warn('Supabase insert notice for submitHallRepRequest:', insertError);
+        });
+        if (error) {
+          toast.error('Application Submission Failed', { description: error.message });
+        } else {
+          await supabase.from('status_events').insert(auditEvent);
+          toast.success('Application Submitted', { description: 'Your application has been received by Administration.' });
         }
-      } catch (err) {
+      } catch (err: any) {
         console.warn('Supabase persist notice for submitHallRepRequest:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
     [currentUser]
@@ -1395,340 +1575,132 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const reviewHallRepRequest = useCallback(
     async (requestId: string, approve: boolean, reason?: string) => {
-      const req = hallRepRequests.find((r) => r.id === requestId);
-      if (!req) return;
+      try {
+        const { error } = await supabase.rpc('admin_review_rep_request', {
+          p_request_id: requestId,
+          p_approved: approve,
+          p_reason: reason?.trim() || null,
+        });
 
-      const now = new Date().toISOString();
-      const nextStatus = approve ? 'approved' : 'rejected';
-
-      setHallRepRequests((prev) =>
-        prev.map((r) =>
-          r.id === requestId
-            ? {
-                ...r,
-                status: nextStatus,
-                rejection_reason: approve ? undefined : reason,
-                reviewed_at: now,
-                reviewed_by: currentUser.name,
-              }
-            : r
-        )
-      );
-
-      let newNotification: Notification;
-
-      if (approve) {
-        // Upgrade applicant to rep
-        setUsers((prev) =>
-          prev.map((u) => (u.id === req.user_id ? { ...u, role: 'rep' } : u))
-        );
-        if (currentUser.id === req.user_id) {
-          setCurrentUser((prev) => ({ ...prev, role: 'rep' }));
+        if (error) {
+          toast.error('Review Action Failed', { description: error.message });
+        } else {
+          toast.success(approve ? 'Request Approved' : 'Request Declined', {
+            description: approve
+              ? 'Candidate appointed as Hall Representative.'
+              : 'Candidate notified of decline decision.',
+          });
+          const req = hallRepRequests.find((r) => r.id === requestId);
+          const nextStatus = approve ? 'approved' : 'rejected';
+          setHallRepRequests((prev) =>
+            prev.map((r) =>
+              r.id === requestId
+                ? {
+                    ...r,
+                    status: nextStatus,
+                    rejection_reason: approve ? undefined : reason,
+                    reviewed_at: new Date().toISOString(),
+                    reviewed_by: currentUser.name,
+                  }
+                : r
+            )
+          );
+          if (approve && req) {
+            setUsers((prev) =>
+              prev.map((u) => (u.id === req.user_id ? { ...u, role: 'rep' } : u))
+            );
+            if (currentUser.id === req.user_id) {
+              setCurrentUser((prev) => ({ ...prev, role: 'rep' }));
+            }
+          }
         }
-
-        newNotification = {
-          id: `n${Date.now()}`,
-          user_id: req.user_id,
-          type: 'rep_request',
-          report_id: 'SYSTEM_NOTIFICATION',
-          report_description: `Hall Rep Appointment: ${req.hall}`,
-          message: `Congratulations! Your application to serve as Hall Representative for ${req.hall} has been approved by the Administration.`,
-          created_at: now,
-          read: false,
-        };
-
-        const auditEvent: StatusEvent = {
-          id: `se-rep-appr-${Date.now()}`,
-          report_id: 'SYSTEM_AUDIT',
-          status: 'open',
-          note: `Admin approved ${req.user_name} as Hall Representative for ${req.hall}`,
-          actor_role: 'admin',
-          actor_name: currentUser.name,
-          actor_id: currentUser.id,
-          created_at: now,
-        };
-        setStatusEvents((prev) => [auditEvent, ...prev]);
-
-        try {
-          await supabase
-            .from('hall_rep_requests')
-            .update({
-              status: 'approved',
-              reviewed_at: now,
-              reviewed_by: currentUser.name,
-            })
-            .eq('id', requestId);
-          await supabase.from('profiles').update({ role: 'rep' }).eq('id', req.user_id);
-          await supabase.from('notifications').insert(newNotification);
-        } catch (err) {
-          console.warn('Supabase persist notice for reviewHallRepRequest approve:', err);
-        }
-      } else {
-        newNotification = {
-          id: `n${Date.now()}`,
-          user_id: req.user_id,
-          type: 'rep_request',
-          report_id: 'SYSTEM_NOTIFICATION',
-          report_description: `Hall Rep Application: ${req.hall}`,
-          message: `Your application for Hall Representative of ${req.hall} was declined: ${reason || 'Criteria not met at this time.'}`,
-          created_at: now,
-          read: false,
-        };
-
-        const auditEvent: StatusEvent = {
-          id: `se-rep-decl-${Date.now()}`,
-          report_id: 'SYSTEM_AUDIT',
-          status: 'open',
-          note: `Admin declined Hall Rep application for ${req.user_name} (${req.hall})`,
-          actor_role: 'admin',
-          actor_name: currentUser.name,
-          actor_id: currentUser.id,
-          created_at: now,
-        };
-        setStatusEvents((prev) => [auditEvent, ...prev]);
-
-        try {
-          await supabase
-            .from('hall_rep_requests')
-            .update({
-              status: 'rejected',
-              rejection_reason: reason || null,
-              reviewed_at: now,
-              reviewed_by: currentUser.name,
-            })
-            .eq('id', requestId);
-          await supabase.from('notifications').insert(newNotification);
-        } catch (err) {
-          console.warn('Supabase persist notice for reviewHallRepRequest reject:', err);
-        }
+      } catch (err: any) {
+        console.warn('RPC admin_review_rep_request error:', err);
+        toast.error('Network Error', { description: err.message });
       }
-
-      setNotifications((prev) => [newNotification, ...prev]);
     },
     [currentUser, hallRepRequests]
   );
 
   const revokeHallRepStatus = useCallback(
     async (userId: string, reason?: string, requestId?: string) => {
-      const now = new Date().toISOString();
-      const user = users.find((u) => u.id === userId);
-      const isSelf = currentUser.id === userId;
-
-      const targetReq = requestId
-        ? hallRepRequests.find((r) => r.id === requestId)
-        : hallRepRequests.find(
-            (r) => (r.user_id === userId || r.student_id === userId) && r.status === 'approved'
-          ) || hallRepRequests.find((r) => r.user_id === userId || r.student_id === userId);
-
-      const hallName = targetReq?.hall || user?.hall_or_dept || 'Assigned Hall';
-      const userName = user?.name || targetReq?.user_name || 'Representative';
-
-      const stepDownReason =
-        reason?.trim() ||
-        (isSelf
-          ? 'Candidate stepped down voluntarily as Hall Representative.'
-          : 'Appointment concluded by University Administration.');
-
-      // 1. Demote user profile in local state
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, role: 'student' } : u))
-      );
-      if (currentUser.id === userId) {
-        setCurrentUser((prev) => ({ ...prev, role: 'student' }));
-      }
-
-      // 2. Mark corresponding hall rep request(s) as stepped_down / concluded
-      setHallRepRequests((prev) =>
-        prev.map((r) => {
-          const matches = requestId
-            ? r.id === requestId
-            : r.user_id === userId || r.student_id === userId;
-          if (matches) {
-            return {
-              ...r,
-              status: 'stepped_down' as HallRepRequestStatus,
-              rejection_reason: stepDownReason,
-              reviewed_at: now,
-              reviewed_by: isSelf ? 'Self (Resigned)' : currentUser.name || 'Administration',
-            };
-          }
-          return r;
-        })
-      );
-
-      // 3. System Notification for candidate
-      const notif: Notification = {
-        id: `n${Date.now()}`,
-        user_id: userId,
-        type: 'rep_request',
-        report_id: 'SYSTEM_AUDIT',
-        report_description: 'Hall Rep Appointment Status',
-        message: isSelf
-          ? `You have stepped down as Hall Representative for ${hallName}. Your account has returned to standard Student access.`
-          : `Your Hall Representative appointment for ${hallName} has concluded. Your account has returned to standard Student access. Reason: ${stepDownReason}`,
-        created_at: now,
-        read: false,
-      };
-      setNotifications((prev) => [notif, ...prev]);
-
-      // 4. System Audit Trail Event
-      const auditEvent: StatusEvent = {
-        id: `se-rep-rev-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: isSelf
-          ? `${userName} stepped down voluntarily as Hall Representative for ${hallName}`
-          : `Admin revoked Hall Representative appointment for ${userName} (${hallName}). Note: ${stepDownReason}`,
-        actor_role: isSelf ? 'student' : 'admin',
-        actor_name: currentUser.name || (isSelf ? 'Self' : 'Administration'),
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-
-      // 5. Persist to Supabase
       try {
-        await supabase.from('profiles').update({ role: 'student' }).eq('id', userId);
-        await supabase.from('notifications').insert(notif);
-        await supabase.from('status_events').insert(auditEvent);
+        const { error } = await supabase.rpc('admin_revoke_rep_status', {
+          p_user_id: userId,
+          p_reason: reason?.trim() || null,
+          p_request_id: requestId || null,
+        });
 
-        const updatePayload = {
-          status: 'stepped_down',
-          rejection_reason: stepDownReason,
-          reviewed_at: now,
-          reviewed_by: isSelf ? 'Self (Resigned)' : currentUser.name || 'Administration',
-        };
-
-        // Query directly by target request ID or user_id (no invalid columns)
-        let updateReqQuery = supabase.from('hall_rep_requests').update(updatePayload);
-        if (targetReq?.id) {
-          updateReqQuery = updateReqQuery.eq('id', targetReq.id);
+        if (error) {
+          toast.error('Action Failed', { description: error.message });
         } else {
-          updateReqQuery = updateReqQuery.eq('user_id', userId);
-        }
-
-        const { error: repUpdateErr } = await updateReqQuery;
-
-        if (repUpdateErr) {
-          console.warn('stepped_down check constraint fallback notice:', repUpdateErr);
-          // If remote Postgres check constraint hasn't been migrated, fallback to 'rejected'
-          let fallbackQuery = supabase.from('hall_rep_requests').update({
-            ...updatePayload,
-            status: 'rejected',
+          toast.success('Appointment Concluded', {
+            description: 'User access returned to standard student level.',
           });
-          if (targetReq?.id) {
-            fallbackQuery = fallbackQuery.eq('id', targetReq.id);
-          } else {
-            fallbackQuery = fallbackQuery.eq('user_id', userId);
+          setUsers((prev) =>
+            prev.map((u) => (u.id === userId ? { ...u, role: 'student' } : u))
+          );
+          if (currentUser.id === userId) {
+            setCurrentUser((prev) => ({ ...prev, role: 'student' }));
           }
-          await fallbackQuery;
         }
-      } catch (err) {
-        console.warn('Supabase persist notice for revokeHallRepStatus:', err);
+      } catch (err: any) {
+        console.warn('RPC admin_revoke_rep_status error:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
-    [currentUser, hallRepRequests, users]
+    [currentUser.id]
   );
 
   // User Administration & Banning
   const banUser = useCallback(
     async (userId: string, reason: string) => {
-      const now = new Date().toISOString();
-      const user = users.find((u) => u.id === userId);
-      if (!user) return;
-
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, is_banned: true, ban_reason: reason } : u))
-      );
-
-      const notif: Notification = {
-        id: `n${Date.now()}`,
-        user_id: userId,
-        type: 'admin_notice',
-        report_id: 'SYSTEM_AUDIT',
-        report_description: 'Account Suspension Notice',
-        message: `Your account has been suspended by administration: ${reason}`,
-        created_at: now,
-        read: false,
-      };
-      setNotifications((prev) => [notif, ...prev]);
-
-      const auditEvent: StatusEvent = {
-        id: `se-ban-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: `Admin suspended account for ${user.name} (${user.email}). Reason: "${reason}"`,
-        actor_role: 'admin',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-
       try {
-        await supabase
-          .from('profiles')
-          .update({ is_banned: true, ban_reason: reason })
-          .eq('id', userId);
-        await supabase.from('notifications').insert(notif);
-        await supabase.from('status_events').insert(auditEvent);
-      } catch (err) {
-        console.warn('Supabase persist notice for banUser:', err);
-      }
+        const { error } = await supabase.rpc('admin_ban_user', {
+          p_user_id: userId,
+          p_reason: reason.trim(),
+        });
 
-      if (currentUser.id === userId) {
-        logout();
+        if (error) {
+          toast.error('Failed to Suspend User', { description: error.message });
+        } else {
+          toast.success('Account Suspended', { description: 'User account has been suspended.' });
+          setUsers((prev) =>
+            prev.map((u) => (u.id === userId ? { ...u, is_banned: true, ban_reason: reason } : u))
+          );
+          if (currentUser.id === userId) {
+            logout();
+          }
+        }
+      } catch (err: any) {
+        console.warn('RPC admin_ban_user error:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
-    [currentUser, logout, users]
+    [currentUser.id, logout]
   );
 
   const unbanUser = useCallback(
     async (userId: string) => {
-      const now = new Date().toISOString();
-      const user = users.find((u) => u.id === userId);
-      if (!user) return;
-
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, is_banned: false, ban_reason: undefined } : u))
-      );
-
-      const notif: Notification = {
-        id: `n${Date.now()}`,
-        user_id: userId,
-        type: 'admin_notice',
-        report_id: 'SYSTEM_AUDIT',
-        report_description: 'Account Reactivation',
-        message: 'Your account suspension has been lifted by administration.',
-        created_at: now,
-        read: false,
-      };
-      setNotifications((prev) => [notif, ...prev]);
-
-      const auditEvent: StatusEvent = {
-        id: `se-unban-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: `Admin reinstated account access for ${user.name}`,
-        actor_role: 'admin',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-
       try {
-        await supabase
-          .from('profiles')
-          .update({ is_banned: false, ban_reason: null })
-          .eq('id', userId);
-        await supabase.from('notifications').insert(notif);
-        await supabase.from('status_events').insert(auditEvent);
-      } catch (err) {
-        console.warn('Supabase persist notice for unbanUser:', err);
+        const { error } = await supabase.rpc('admin_unban_user', {
+          p_user_id: userId,
+        });
+
+        if (error) {
+          toast.error('Failed to Reinstate User', { description: error.message });
+        } else {
+          toast.success('Account Reinstated', { description: 'User suspension has been lifted.' });
+          setUsers((prev) =>
+            prev.map((u) => (u.id === userId ? { ...u, is_banned: false, ban_reason: undefined } : u))
+          );
+        }
+      } catch (err: any) {
+        console.warn('RPC admin_unban_user error:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
-    [currentUser, users]
+    []
   );
 
   const updateUserProfile = useCallback(
@@ -1736,66 +1708,69 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       userId: string,
       data: { name?: string; email?: string; hall_or_dept?: string; role?: Role }
     ) => {
-      setUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, ...data } : u))
-      );
-      if (currentUser.id === userId) {
-        setCurrentUser((prev) => ({ ...prev, ...data }));
+      if (data.role) {
+        await updateUserRole(userId, data.role);
       }
 
-      const now = new Date().toISOString();
-      const auditEvent: StatusEvent = {
-        id: `se-upd-usr-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: `Admin updated account profile for user ID ${userId}`,
-        actor_role: 'admin',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-      setStatusEvents((prev) => [auditEvent, ...prev]);
+      const { role: _, ...profileFields } = data;
+      if (Object.keys(profileFields).length > 0) {
+        setUsers((prev) =>
+          prev.map((u) => (u.id === userId ? { ...u, ...profileFields } : u))
+        );
+        if (currentUser.id === userId) {
+          setCurrentUser((prev) => ({ ...prev, ...profileFields }));
+        }
 
-      try {
-        await supabase.from('profiles').update(data).eq('id', userId);
-        await supabase.from('status_events').insert(auditEvent);
-      } catch (err) {
-        console.warn('Supabase persist notice for updateUserProfile:', err);
+        try {
+          const { error } = await supabase.from('profiles').update(profileFields).eq('id', userId);
+          if (error) {
+            console.error('Supabase profile update error:', error);
+            toast.error('Profile Update Failed', { description: error.message });
+            throw new Error(error.message);
+          }
+
+          // If updating own profile, also keep Supabase Auth metadata in sync
+          if (currentUser.id === userId) {
+            const authMeta: Record<string, any> = {};
+            if (profileFields.name) authMeta.name = profileFields.name;
+            if (profileFields.hall_or_dept) authMeta.hall_or_dept = profileFields.hall_or_dept;
+            if (Object.keys(authMeta).length > 0) {
+              await supabase.auth.updateUser({ data: authMeta });
+            }
+          }
+
+          toast.success('Profile Updated');
+        } catch (err: any) {
+          console.warn('Supabase persist notice for updateUserProfile:', err);
+          throw err;
+        }
       }
     },
-    [currentUser]
+    [currentUser.id, updateUserRole]
   );
 
   const deleteUserProfile = useCallback(
     async (userId: string) => {
-      const user = users.find((u) => u.id === userId);
-      setUsers((prev) => prev.filter((u) => u.id !== userId));
-
-      const now = new Date().toISOString();
-      const auditEvent: StatusEvent = {
-        id: `se-del-usr-${Date.now()}`,
-        report_id: 'SYSTEM_AUDIT',
-        status: 'open',
-        note: `Admin deleted user profile ${user?.name || userId}`,
-        actor_role: 'admin',
-        actor_name: currentUser.name,
-        actor_id: currentUser.id,
-        created_at: now,
-      };
-      setStatusEvents((prev) => [auditEvent, ...prev]);
-
       try {
-        await supabase.from('profiles').delete().eq('id', userId);
-        await supabase.from('status_events').insert(auditEvent);
-      } catch (err) {
-        console.warn('Supabase persist notice for deleteUserProfile:', err);
-      }
+        const { error } = await supabase.rpc('admin_delete_user', {
+          p_user_id: userId,
+        });
 
-      if (currentUser.id === userId) {
-        logout();
+        if (error) {
+          toast.error('Failed to Delete Account', { description: error.message });
+        } else {
+          toast.success('Account Deleted', { description: 'User account permanently removed.' });
+          setUsers((prev) => prev.filter((u) => u.id !== userId));
+          if (currentUser.id === userId) {
+            logout();
+          }
+        }
+      } catch (err: any) {
+        console.warn('RPC admin_delete_user error:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
-    [currentUser, logout, users]
+    [currentUser.id, logout]
   );
 
   // Report Archiving
@@ -1815,7 +1790,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       let notif: Notification | null = null;
       if (report && currentUser.id !== report.student_id) {
         notif = {
-          id: `n${Date.now()}`,
+          id: crypto.randomUUID(),
           user_id: report.student_id,
           type: 'admin_notice',
           report_id: reportId,
@@ -1828,7 +1803,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
 
       const auditEvent: StatusEvent = {
-        id: `se-arch-${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         status: report?.status || 'open',
         note: `Report archived by admin: "${reason}"`,
@@ -1840,16 +1815,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setStatusEvents((prev) => [auditEvent, ...prev]);
 
       try {
-        await supabase
+        const { error } = await supabase
           .from('reports')
           .update({ is_archived: true, archived_at: now, archived_reason: reason })
           .eq('id', reportId);
-        await supabase.from('status_events').insert(auditEvent);
-        if (notif && report) {
-          await supabase.from('notifications').insert(notif);
+        if (error) {
+          toast.error('Failed to Archive Report', { description: error.message });
+        } else {
+          await supabase.from('status_events').insert(auditEvent);
+          toast.success('Report Archived', { description: 'Report moved to archived records.' });
         }
-      } catch (err) {
+      } catch (err: any) {
         console.warn('Supabase persist notice for archiveReport:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
     [currentUser, reports]
@@ -1871,12 +1849,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       let notif: Notification | null = null;
       if (report && currentUser.id !== report.student_id) {
         notif = {
-          id: `n${Date.now()}`,
+          id: crypto.randomUUID(),
           user_id: report.student_id,
           type: 'admin_notice',
           report_id: reportId,
           report_description: `${report.location_name}: ${report.description.slice(0, 45)}...`,
-          message: 'Your report has been unarchived and restored to the active incident feed.',
+          message: 'Your report has been unarchived and restored to active incident records.',
           created_at: now,
           read: false,
         };
@@ -1884,7 +1862,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
 
       const auditEvent: StatusEvent = {
-        id: `se-rest-${Date.now()}`,
+        id: crypto.randomUUID(),
         report_id: reportId,
         status: report?.status || 'open',
         note: 'Report restored from archive by admin',
@@ -1896,16 +1874,19 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setStatusEvents((prev) => [auditEvent, ...prev]);
 
       try {
-        await supabase
+        const { error } = await supabase
           .from('reports')
           .update({ is_archived: false, archived_at: null, archived_reason: null })
           .eq('id', reportId);
-        await supabase.from('status_events').insert(auditEvent);
-        if (notif && report) {
-          await supabase.from('notifications').insert(notif);
+        if (error) {
+          toast.error('Failed to Restore Report', { description: error.message });
+        } else {
+          await supabase.from('status_events').insert(auditEvent);
+          toast.success('Report Restored', { description: 'Report returned to active feed.' });
         }
-      } catch (err) {
+      } catch (err: any) {
         console.warn('Supabase persist notice for restoreReport:', err);
+        toast.error('Network Error', { description: err.message });
       }
     },
     [currentUser, reports]
@@ -1936,6 +1917,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     hasRepConfirmed,
     hasRepDisputed,
     updateReportStatus,
+    updateReportPriority,
+    assignReportTechnician,
     addComment,
     addInternalNote,
     updateInternalNote,
@@ -1949,6 +1932,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     addLocation,
     updateLocation,
     deleteLocation,
+    campusUnits,
+    addCampusUnit,
+    updateCampusUnit,
+    deleteCampusUnit,
     getReportById,
     getStatusEventsByReport,
     getCommentsByReport,

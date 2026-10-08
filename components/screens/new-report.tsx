@@ -41,9 +41,10 @@ export function NewReport({
   onNavigate: (screen: ScreenName) => void;
   onOpenReport: (id: string) => void;
 }) {
-  const { locations, addReport } = useData();
+  const { locations, campusUnits, addReport, currentUser } = useData();
   const [locationId, setLocationId] = useState('');
   const [locationName, setLocationName] = useState('');
+  const [specificArea, setSpecificArea] = useState('');
   const [category, setCategory] = useState<Category | ''>('');
   const [description, setDescription] = useState('');
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
@@ -52,21 +53,53 @@ export function NewReport({
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const groupedLocations = useMemo(() => {
-    const groups: Record<string, typeof locations> = {};
+  // Group locations based on official Campus Units registry
+  const groupedLocations = useMemo<Record<string, { id: string; name: string; hall: string }[]>>(() => {
+    // If campus units are available, group cleanly by their official categories
+    if (campusUnits && campusUnits.length > 0) {
+      const groups: Record<string, { id: string; name: string; hall: string }[]> = {
+        'Residence Halls': [],
+        'Academic Departments': [],
+        'Administrative Units': [],
+      };
+
+      campusUnits.forEach((unit) => {
+        // Find matching location in locations table (synced by ID or name)
+        const matchedLoc = locations.find((l) => l.id === unit.id || l.name.toLowerCase() === unit.name.toLowerCase());
+        const locId = matchedLoc ? matchedLoc.id : unit.id;
+        const entry = { id: locId, name: unit.name, hall: unit.name };
+
+        if (unit.category === 'hall') {
+          groups['Residence Halls'].push(entry);
+        } else if (unit.category === 'department') {
+          groups['Academic Departments'].push(entry);
+        } else {
+          groups['Administrative Units'].push(entry);
+        }
+      });
+
+      return groups;
+    }
+
+    // Fallback: group standard locations by building type
+    const fallbackGroups: Record<string, { id: string; name: string; hall: string }[]> = {};
     locations.forEach((loc) => {
       const key = buildingTypeLabel(loc.building_type);
-      if (!groups[key]) groups[key] = [];
-      groups[key].push(loc);
+      if (!fallbackGroups[key]) fallbackGroups[key] = [];
+      fallbackGroups[key].push({
+        id: loc.id,
+        name: loc.name,
+        hall: loc.hall || loc.name,
+      });
     });
-    return groups;
-  }, [locations]);
+    return fallbackGroups;
+  }, [campusUnits, locations]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const newErrors: Record<string, string> = {};
 
-    if (!locationId) newErrors.location = 'Please select a location';
+    if (!locationId) newErrors.location = 'Please select a campus hall, building, or unit';
     if (!category) newErrors.category = 'Please select a category';
     if (description.trim().length < 20)
       newErrors.description = 'Please provide at least 20 characters describing the issue';
@@ -75,17 +108,26 @@ export function NewReport({
     if (Object.keys(newErrors).length > 0) return;
 
     setSubmitting(true);
-    setTimeout(() => {
-      const newReport = addReport({
+    try {
+      const selectedLoc = locations.find((l) => l.id === locationId);
+      const cleanSpecific = specificArea.trim();
+      const finalLocationName = cleanSpecific
+        ? `${locationName} (${cleanSpecific})`
+        : locationName;
+
+      const newReport = await addReport({
         location_id: locationId,
-        location_name: locationName,
+        location_name: finalLocationName,
+        hall: selectedLoc?.hall || locationName,
         category: category as Category,
         description: description.trim(),
         photo_url: photoUrl,
       });
       setSubmitting(false);
       onOpenReport(newReport.id);
-    }, 400);
+    } catch (err) {
+      setSubmitting(false);
+    }
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -108,16 +150,16 @@ export function NewReport({
 
     setUploadingPhoto(true);
     try {
-      const url = await uploadReportPhoto(file);
+      const url = await uploadReportPhoto(file, currentUser.id);
       setPhotoUrl(url);
       toast.success('Incident Photo Uploaded', {
         description: 'Photo evidence successfully saved to Supabase storage.',
       });
     } catch (err: any) {
       console.warn('Error uploading photo:', err);
-      setPhotoUrl(URL.createObjectURL(file));
-      toast.info('Local Preview Active', {
-        description: 'Photo preview loaded locally.',
+      setPhotoUrl(null);
+      toast.error('Photo Upload Failed', {
+        description: err.message || 'Could not upload photo to storage. You may try again or submit without a photo.',
       });
     } finally {
       setUploadingPhoto(false);
@@ -150,60 +192,80 @@ export function NewReport({
       </div>
 
       <form onSubmit={handleSubmit} className="rounded-xl border border-border bg-card p-6 shadow-[0_1px_3px_rgba(0,0,0,0.03)] space-y-6">
-        {/* Location */}
-        <div className="space-y-2">
-          <Label htmlFor="location" className="text-xs font-semibold">
-            Campus Location / Facility Room
-          </Label>
-          <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
-            <PopoverTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                role="combobox"
-                aria-expanded={popoverOpen}
-                className="w-full justify-between font-normal text-xs h-9"
-              >
-                {locationName || 'Search for a building, hall, or room...'}
-                <ChevronDown className="ml-2 h-3.5 w-3.5 opacity-50" />
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-              <Command>
-                <CommandInput placeholder="Search location..." className="text-xs" />
-                <CommandList>
-                  <CommandEmpty className="text-xs py-3 text-center">No location found.</CommandEmpty>
-                  {Object.entries(groupedLocations).map(([group, locs]) => (
-                    <CommandGroup key={group} heading={group}>
-                      {locs.map((loc) => (
-                        <CommandItem
-                          key={loc.id}
-                          value={loc.name}
-                          onSelect={() => {
-                            setLocationId(loc.id);
-                            setLocationName(loc.name);
-                            setPopoverOpen(false);
-                          }}
-                          className="text-xs"
-                        >
-                          <Check
-                            className={cn(
-                              'mr-2 h-3.5 w-3.5',
-                              locationId === loc.id ? 'opacity-100' : 'opacity-0'
-                            )}
-                          />
-                          {loc.name}
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  ))}
-                </CommandList>
-              </Command>
-            </PopoverContent>
-          </Popover>
-          {errors.location && (
-            <p className="text-xs text-destructive">{errors.location}</p>
-          )}
+        {/* Campus Unit Location */}
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="location" className="text-xs font-semibold">
+              Campus Facility / Building
+            </Label>
+            <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  type="button"
+                  variant="outline"
+                  role="combobox"
+                  aria-expanded={popoverOpen}
+                  className="w-full justify-between font-normal text-xs h-9"
+                >
+                  {locationName || 'Select a hall, academic department, or administrative unit...'}
+                  <ChevronDown className="ml-2 h-3.5 w-3.5 opacity-50" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                <Command>
+                  <CommandInput placeholder="Search campus unit..." className="text-xs" />
+                  <CommandList>
+                    <CommandEmpty className="text-xs py-3 text-center">No campus unit found.</CommandEmpty>
+                    {Object.entries(groupedLocations).map(([group, locs]) => (
+                      <CommandGroup key={group} heading={group}>
+                        {locs.map((loc) => (
+                          <CommandItem
+                            key={loc.id}
+                            value={loc.name}
+                            onSelect={() => {
+                              setLocationId(loc.id);
+                              setLocationName(loc.name);
+                              setPopoverOpen(false);
+                            }}
+                            className="text-xs"
+                          >
+                            <Check
+                              className={cn(
+                                'mr-2 h-3.5 w-3.5',
+                                locationId === loc.id ? 'opacity-100' : 'opacity-0'
+                              )}
+                            />
+                            {loc.name}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    ))}
+                  </CommandList>
+                </Command>
+              </PopoverContent>
+            </Popover>
+            {errors.location && (
+              <p className="text-xs text-destructive">{errors.location}</p>
+            )}
+          </div>
+
+          {/* Specific Room / Area (Optional) */}
+          <div className="space-y-1.5">
+            <Label htmlFor="specificArea" className="text-xs font-semibold text-foreground">
+              Room or Specific Spot <span className="text-muted-foreground font-normal">(Optional)</span>
+            </Label>
+            <Input
+              id="specificArea"
+              value={specificArea}
+              onChange={(e) => setSpecificArea(e.target.value)}
+              placeholder="e.g. Room 204, 2nd Floor Restroom, Lab 3, Block A Stairwell"
+              className="h-9 text-xs font-normal"
+              maxLength={80}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Pinpoints the exact location within the selected campus building or hall.
+            </p>
+          </div>
         </div>
 
         {/* Category */}
@@ -299,7 +361,7 @@ export function NewReport({
                 Click to attach photo evidence
               </span>
               <span className="font-mono text-[10px] text-muted-foreground">
-                JPG, PNG up to 10MB &bull; +5 pts telemetry verification
+                JPG, PNG up to 10MB &bull; +2 pts verification
               </span>
               <input
                 type="file"
